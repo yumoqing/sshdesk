@@ -19,6 +19,8 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APPPUBLIC = os.environ.get("SSHDESK_APPPUBLIC") or r"D:\work\repos\apppublic"
+BRICKSQT = (os.environ.get("SSHDESK_BRICKSQT")
+            or os.path.join(os.path.dirname(ROOT), "bricks-qt"))   # 界面渲染器源码仓
 SEP = ";" if sys.platform.startswith("win") else ":"          # PyInstaller 的 --add-data 分隔符
 
 
@@ -32,7 +34,8 @@ def main() -> int:
             "--name", "sshdesk", mode,
             "--console" if console else "--windowed",
             "--paths", ROOT,
-            "--collect-submodules", "bricks_qt",      # 界面来自 bricks_qt
+            "--hidden-import", "bricks_qt",           # 界面来自 bricks_qt（editable 装法 PyInstaller 可能跟不到，下面再补 --paths）
+            "--collect-submodules", "bricks_qt",
             "--collect-submodules", "appPublic",
             "--collect-submodules", "asyncssh",
             "--collect-submodules", "pyte",
@@ -58,6 +61,8 @@ def main() -> int:
 
     if os.path.isdir(APPPUBLIC):
         args += ["--paths", APPPUBLIC]
+    if os.path.isdir(BRICKSQT):
+        args += ["--paths", BRICKSQT]
     args.append(entry)
 
     print("运行:", " ".join(args[:10]), "...")
