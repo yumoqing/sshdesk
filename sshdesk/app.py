@@ -179,10 +179,17 @@ class MainWindow(BricksWindow):
         ctx.on("session_activated", lambda n, e, label: self.connect_by_name(str(label or "")))
         ctx.on("close_tab", lambda n, e, idx: self.close_tab(int(idx)))
 
-        icon = _app_asset("sshdesk.png") or _app_asset("sshdesk.ico")
-        if icon:
-            from PySide6.QtGui import QIcon
-            self.setWindowIcon(QIcon(icon))
+        from PySide6.QtGui import QIcon
+        icon = QIcon()
+        for n in (16, 24, 32, 48, 64, 128, 256, 512, 1024):
+            p = _app_asset("sshdesk-%dx%d.png" % (n, n)) or (
+                _app_asset("sshdesk-512.png") if n == 512 else "")
+            if p:
+                icon.addFile(p)
+        if icon.availableSizes():
+            self.setWindowIcon(icon)
+        elif _app_asset("sshdesk.png"):
+            self.setWindowIcon(QIcon(_app_asset("sshdesk.png")))
         self.font_label.setText("字号 %d" % self.cfg.font_size)
         self.fill_sessions()
 

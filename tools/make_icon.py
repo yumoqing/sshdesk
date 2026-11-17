@@ -125,8 +125,9 @@ def main() -> int:
 
     render(1024).save(os.path.join(ASSETS, "sshdesk.png"))
     render(512).save(os.path.join(ASSETS, "sshdesk-512.png"))
+    for n in (16, 24, 32, 48, 64, 128, 256):        # 窗口/任务栏按需取，避免 1024 缩放糊
+        render(n).save(os.path.join(ASSETS, "sshdesk-%dx%d.png" % (n, n)))
 
-    render(16).save(os.path.join(ASSETS, "sshdesk-16.png"))
     frames = [render(n) for n in ICO_SIZES]
     frames[-1].save(os.path.join(ASSETS, "sshdesk.ico"), format="ICO",
                     sizes=[(n, n) for n in ICO_SIZES])
