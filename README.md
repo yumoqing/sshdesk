@@ -125,3 +125,23 @@ python -m sshdesk                     # 直接起窗口
   首次打开如被 Gatekeeper 拦，右键 → 打开，或 `xattr -dr com.apple.quarantine dist/sshdesk.app`
 - 用 `~/.ssh/id_rsa` 免密连 kymoz 这类主机没问题（asyncssh 直接用系统密钥）
 - CI 在 `macos-latest` 上跑 `.ui` 构建校验 + 原生控件冒烟，作为"macOS 原生可用"的持续证据
+
+### 在 Mac 上实测（远程，经跳板机）
+
+```bash
+# 1) 传代码（在 Windows/WSL 侧执行；Mac 无 brew，别指望 pip 直连 PyPI 快速装）
+tar czf - --exclude=out --exclude=dist --exclude=__pycache__ bricks-qt sshdesk \
+  | ssh -J ymq@kymoz.com ymq@<mac> 'mkdir -p ~/code && tar xzf - -C ~/code'
+tar czf - --exclude=__pycache__ appPublic | ssh -J ymq@kymoz.com ymq@<mac> 'mkdir -p ~/code/apppublic && tar xzf - -C ~/code/apppublic'
+
+# 2) 环境（Mac 上 /usr/local/bin/python3.12；非交互 ssh 的 PATH 里没有它）
+/usr/local/bin/python3.12 -m venv ~/.venv-sshdesk && . ~/.venv-sshdesk/bin/activate
+pip install -i https://pypi.tuna.tsinghua.edu.cn/simple PySide6-Essentials pyte wcwidth json5 paramiko asyncssh jinja2
+
+# 3) 验收（同一套用例，Windows/Linux/macOS 完全一致）
+export PYTHONPATH=~/code/bricks-qt:~/code/sshdesk:~/code/apppublic
+python -m bricks_qt.cli check sshdesk/ui/session.ui --strict
+python tests/native_smoke.py            # 打印 "native smoke ok: ... 在 darwin 可用"
+```
+
+图形验证用 `win.grab()` 存 PNG（ssh 会话里 `screencapture` 会因为缺"屏幕录制"权限失败）。
