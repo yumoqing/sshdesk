@@ -102,6 +102,7 @@ class FileTable(QWidget):
 
     activated = Signal(str)          # 双击文件
     dir_changed = Signal(str)
+    sel_changed = Signal(bool)       # 是否有选中项
 
     def __init__(self, fs, title: str, parent=None):
         super().__init__(parent)
@@ -129,7 +130,7 @@ class FileTable(QWidget):
         ops.setSpacing(4)
         ops.setContentsMargins(32, 0, 0, 0)
         for text, tip, fn, width in (
-                ("↑", "上级目录", lambda: self.chdir(self.fs.parent(self.cwd)), 28),
+                ("上级", "上一级目录", lambda: self.chdir(self.fs.parent(self.cwd)), 44),
                 ("刷新", "重新读取目录", self.reload, 44),
                 ("新建", "在当前目录新建文件夹", self._mkdir, 44),
                 ("删除", "删除选中项", self._remove, 44)):
@@ -137,6 +138,11 @@ class FileTable(QWidget):
             b.setToolTip(tip)
             b.setFixedWidth(width)
             b.clicked.connect(fn)
+            if text == "删除":
+                self.btn_remove = b
+                b.setEnabled(False)
+            if text == "上级":
+                self.btn_up = b
             ops.addWidget(b)
         ops.addStretch(1)
         lay.addLayout(ops)
@@ -156,7 +162,10 @@ class FileTable(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.table.doubleClicked.connect(self._on_double)
+        self.table.itemSelectionChanged.connect(
+            lambda: self.sel_changed.emit(bool(self.table.selectedItems())))
         lay.addWidget(self.table, 1)
+        self.sel_changed.connect(self.btn_remove.setEnabled)
 
         self.reload()
 
@@ -176,6 +185,10 @@ class FileTable(QWidget):
 
     def reload(self) -> None:
         self.table.setRowCount(0)
+        try:
+            self.btn_up.setEnabled(self.fs.parent(self.cwd) != self.cwd)
+        except Exception:                       # noqa: BLE001
+            pass
         try:
             rows = self.fs.listdir(self.cwd)
         except Exception as e:                  # noqa: BLE001
@@ -264,28 +277,50 @@ class FileBrowser(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
 
-        ops = QHBoxLayout()
-        self.btn_upload = QPushButton("上传 →")
+        # 本地在上、远端在下：上传是"往下走"，下载是"往上走"，箭头必须跟排布一致
+        self.btn_upload = QPushButton("上传  本地 → 远端")
+        self.btn_upload.setToolTip("把上方「本地」里选中的文件传到下方「远端」当前目录")
         self.btn_upload.clicked.connect(self.upload)
-        self.btn_download = QPushButton("← 下载")
+        self.btn_download = QPushButton("下载  远端 → 本地")
+        self.btn_download.setToolTip("把下方「远端」里选中的文件传到上方「本地」当前目录")
         self.btn_download.clicked.connect(self.download)
+        self.hint = QLabel("选中文件后才能上传 / 下载")
+        self.hint.setStyleSheet("color:#767676")
+
+        bar = QWidget()
+        ops = QHBoxLayout(bar)
+        ops.setContentsMargins(0, 2, 0, 2)
         ops.addWidget(self.btn_upload)
         ops.addWidget(self.btn_download)
-        ops.addStretch(1)
-        self.hint = QLabel("")
-        ops.addWidget(self.hint)
-        lay.addLayout(ops)
+        ops.addSpacing(8)
+        ops.addWidget(self.hint, 1)
+        bar.setFixedHeight(40)
 
         # 面板本身不宽，左右并排会把"名称"列压没；上下叠放，每栏都占满宽度
         sp = QSplitter(Qt.Vertical)
         self.local = FileTable(LocalFS(), "本地")
         self.remote = FileTable(RemoteFS(session), "远端 %s" % session.profile.host)
         sp.addWidget(self.local)
+        sp.addWidget(bar)          # 传输按钮夹在两栏之间，方向一眼看懂
         sp.addWidget(self.remote)
         sp.setChildrenCollapsible(False)
-        sp.setSizes([300, 300])
+        sp.setCollapsible(1, False)
+        sp.setStretchFactor(0, 1)
+        sp.setStretchFactor(2, 1)
+        sp.setSizes([300, 40, 300])
         lay.addWidget(sp, 1)
+        for t in (self.local, self.remote):
+            t.sel_changed.connect(self._update_transfer_state)
+        self.btn_upload.setEnabled(False)
+        self.btn_download.setEnabled(False)
         self.remote.activated.connect(lambda p: self.hint.setText("远端文件：%s" % p))
+
+    def _update_transfer_state(self, _=None) -> None:
+        up = bool(self.local.table.selectedItems())
+        down = bool(self.remote.table.selectedItems())
+        self.btn_upload.setEnabled(up)
+        self.btn_download.setEnabled(down)
+        self.hint.setText("" if (up or down) else "选中文件后才能上传 / 下载")
 
     # ---- 传输 ----
     def _run_transfer(self, title: str, fn) -> None:

@@ -45,7 +45,23 @@ class SessionTab(QWidget):
         self.term.connected_changed.connect(self._on_conn_changed)
 
     # ---- 连接 ----
+    def ask_password(self) -> bool:
+        """配置里没存密码时，连之前先问用户要（密码默认不落盘）。"""
+        from PySide6.QtWidgets import QInputDialog, QLineEdit
+        pwd, ok = QInputDialog.getText(
+            self, "需要密码",
+            "%s@%s 的登录密码：" % (self.profile.user, self.profile.host),
+            QLineEdit.Password)
+        if not ok or not pwd:
+            return False
+        self.profile.password = pwd
+        return True
+
     def connect(self) -> bool:
+        if self.profile.auth == "password" and not self.profile.password:
+            if not self.ask_password():
+                self.failed.emit("已取消：没有密码")
+                return False
         QGuiApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             self.session = SSHSession(self.profile).connect()
