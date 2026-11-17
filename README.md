@@ -38,6 +38,21 @@ sshdesk --list          :: 列出已保存会话
 python -m pip install -e D:\work\repos\appPublic   :: 或者把仓库根加进 PYTHONPATH
 ```
 
+## 打包成 exe
+
+```bat
+python tools/build_exe.py --onedir            :: 产物 dist\sshdesk\sshdesk.exe（推荐，双击即用）
+python tools/build_exe.py --onefile --console :: 单文件（启动慢些，便于分发）
+```
+
+onedir 实测 **124 MB**（PySide6 占大头），包含 PySide6/asyncssh/paramiko/pyte/appPublic 全部依赖，
+目标机不需要装 Python。冒烟：
+
+```bat
+dist\sshdesk\sshdesk.exe --selftest     :: 起窗口 1.2 秒后自动退出，rc=0 即正常
+dist\sshdesk\sshdesk.exe --list         :: 列已保存会话
+```
+
 ## 会话保存在哪
 
 `%APPDATA%\sshdesk\hosts.json`（Windows 一般是 `C:\Users\<你>\AppData\Roaming\sshdesk\hosts.json`），

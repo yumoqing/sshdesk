@@ -270,6 +270,25 @@ class MainWindow(QMainWindow):
         super().closeEvent(e)
 
 
+def _utf8_console() -> None:
+    """Windows 控制台默认 cp1252，打印中文会 UnicodeEncodeError；窗口版就没有 stdout。"""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
+def _emit(msg: str) -> None:
+    try:
+        if sys.stdout is not None:
+            print(msg)
+    except Exception:                              # noqa: BLE001
+        pass
+
+
 def _apply_ui_font(app: QApplication) -> None:
     """界面字体：优先中文字体，终端仍用等宽字体。"""
     from PySide6.QtGui import QFont, QFontDatabase
@@ -281,6 +300,7 @@ def _apply_ui_font(app: QApplication) -> None:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    _utf8_console()
     argv = list(sys.argv if argv is None else argv)
     cfg = AppConfig.load()
     app = QApplication(argv[:1])
@@ -292,18 +312,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     for a in argv[1:]:
         if a in ("--list", "-l"):
             for h in cfg.hosts:
-                print(h.display())
+                _emit(h.display())
             return 0
         if not a.startswith("-"):
             want = cfg.by_name(a)
             if want is None:
-                print("找不到会话：%s" % a, file=sys.stderr)
+                _emit("找不到会话：%s" % a)
     if "--selftest" in argv:
         from PySide6.QtCore import QTimer
         win.show()
         QTimer.singleShot(1200, app.quit)
         rc = app.exec()
-        print("selftest ok: %d 个会话，窗口正常起来" % len(cfg.hosts))
+        _emit("selftest ok: %d 个会话，窗口正常起来" % len(cfg.hosts))
         return rc
     win.show()
     if want is not None:
