@@ -240,7 +240,7 @@ def main() -> int:
             app.processEvents()
             time.sleep(0.05)
         assert win.tabs.count() == 1, "标签数=%d" % win.tabs.count()
-        tab = win.tabs.widget(0)
+        tab = win.pages_[0]
         win.open_tab(key_prof)
         app.processEvents()
         assert win.tabs.count() == 2, "多标签失败：%d" % win.tabs.count()
@@ -257,13 +257,12 @@ def main() -> int:
         # 文件面板
         tab.show_files(True)
         app.processEvents()
-        assert tab.browser is not None, "文件面板没建起来"
-        assert tab.browser.cwd, "远端目录为空"
-        assert tab.browser.table.rowCount() >= 1, "远端目录没有条目"
-        # 根目录本身没有上级，就不该有 ".."；进子目录才要
-        names = [tab.browser.table.item(r, 0).text() for r in range(tab.browser.table.rowCount())]
+        assert tab.files is not None, "文件面板没建起来"
+        assert tab.files.cwd, "远端目录为空"
+        assert tab.files.table.rowCount() >= 1, "远端目录没有条目"
+        names = [tab.files.table.item(r, 0).text() for r in range(tab.files.table.rowCount())]
         assert names, "远端目录为空"
-        assert tab.browser.cwd == "/" and ".." not in names, \
+        assert tab.files.cwd == "/" and ".." not in names, \
             "根目录不该有 ..：%r" % names[:3]
 
         # 终端内容断言（窗口截图对自绘控件不可靠，另存一张终端单独的图作证据）

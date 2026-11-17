@@ -1,0 +1,25 @@
+{
+  "widgettype": "TabPanel",
+  "id": "pages",
+  "options": {
+    "width": "100%",
+    "height": "100%"
+  },
+  "subwidgets": [
+    {
+      "widgettype": "Terminal",
+      "id": "term",
+      "options": {
+        "label": "终端",
+        "font_size": 12
+      }
+    },
+    {
+      "widgettype": "RemoteFiles",
+      "id": "files",
+      "options": {
+        "label": "文件"
+      }
+    }
+  ]
+}

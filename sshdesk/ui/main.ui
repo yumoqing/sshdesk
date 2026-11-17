@@ -1,0 +1,200 @@
+{
+  "widgettype": "VBox",
+  "id": "root",
+  "options": {
+    "width": "100%",
+    "height": "100%"
+  },
+  "subwidgets": [
+    {
+      "widgettype": "HBox",
+      "id": "toolbar",
+      "options": {
+        "height": "46px"
+      },
+      "subwidgets": [
+        {
+          "widgettype": "Button",
+          "id": "btn_new",
+          "options": {
+            "label": "＋ 新建会话"
+          },
+          "binds": [
+            {
+              "event": "click",
+              "actiontype": "script",
+              "script": "new_session"
+            }
+          ]
+        },
+        {
+          "widgettype": "Button",
+          "id": "btn_manage",
+          "options": {
+            "label": "管理"
+          },
+          "binds": [
+            {
+              "event": "click",
+              "actiontype": "script",
+              "script": "manage_sessions"
+            }
+          ]
+        },
+        {
+          "widgettype": "Button",
+          "id": "btn_connect",
+          "options": {
+            "label": "连接"
+          },
+          "binds": [
+            {
+              "event": "click",
+              "actiontype": "script",
+              "script": "connect_selected"
+            }
+          ]
+        },
+        {
+          "widgettype": "Button",
+          "id": "btn_reconnect",
+          "options": {
+            "label": "重连"
+          },
+          "binds": [
+            {
+              "event": "click",
+              "actiontype": "script",
+              "script": "reconnect"
+            }
+          ]
+        },
+        {
+          "widgettype": "Filler",
+          "options": {}
+        },
+        {
+          "widgettype": "Text",
+          "id": "font_label",
+          "options": {
+            "label": "字号 12"
+          }
+        },
+        {
+          "widgettype": "Button",
+          "id": "btn_font_dn",
+          "options": {
+            "label": "A－"
+          },
+          "binds": [
+            {
+              "event": "click",
+              "actiontype": "script",
+              "script": "font_down"
+            }
+          ]
+        },
+        {
+          "widgettype": "Button",
+          "id": "btn_font_up",
+          "options": {
+            "label": "A＋"
+          },
+          "binds": [
+            {
+              "event": "click",
+              "actiontype": "script",
+              "script": "font_up"
+            }
+          ]
+        },
+        {
+          "widgettype": "Button",
+          "id": "btn_font_reset",
+          "options": {
+            "label": "复位"
+          },
+          "binds": [
+            {
+              "event": "click",
+              "actiontype": "script",
+              "script": "font_reset"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "widgettype": "HBox",
+      "id": "body",
+      "options": {
+        "width": "100%",
+        "height": "100%"
+      },
+      "subwidgets": [
+        {
+          "widgettype": "VBox",
+          "id": "left",
+          "options": {
+            "width": "280px",
+            "height": "100%"
+          },
+          "subwidgets": [
+            {
+              "widgettype": "SearchBar",
+              "id": "search",
+              "options": {
+                "placeholder": "过滤…"
+              },
+              "binds": [
+                {
+                  "event": "search",
+                  "actiontype": "script",
+                  "script": "filter_sessions"
+                }
+              ]
+            },
+            {
+              "widgettype": "Tree",
+              "id": "sessions",
+              "options": {
+                "width": "100%",
+                "height": "100%"
+              },
+              "binds": [
+                {
+                  "event": "node_selected",
+                  "actiontype": "script",
+                  "script": "session_activated"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "widgettype": "TabPanel",
+          "id": "workspace",
+          "options": {
+            "width": "100%",
+            "height": "100%",
+            "closable": true
+          },
+          "binds": [
+            {
+              "event": "close",
+              "actiontype": "script",
+              "script": "close_tab"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "widgettype": "Text",
+      "id": "status",
+      "options": {
+        "label": "就绪"
+      }
+    }
+  ]
+}

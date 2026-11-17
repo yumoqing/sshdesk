@@ -1,4 +1,13 @@
-"""主窗口：会话列表 + 多标签终端 + 文件面板 + 字体缩放。"""
+"""sshdesk 主程序：界面完全由 bricks .ui 描述，bricks_qt 渲染成 Qt 原生窗口。
+
+这份 app.py 只管"业务"——SSH/SFTP、配置、对话框；界面在 ui/main.ui 与 ui/session.ui 里：
+
+    ui/main.ui      工具栏 + 会话树 + 工作区页签（TabPanel）
+    ui/session.ui   一个会话的「终端 / 文件」两个页签（Terminal / RemoteFiles）
+
+按钮点了什么，靠 Ctx 的宿主动作表：.ui 里 `binds[].actiontype=script` + `script=<名字>`，
+桌面侧就到 ctx.on(名字) 注册的 Python 函数；同一份 .ui 在 web 侧跑的是同名 JS 函数。
+"""
 
 from __future__ import annotations
 
@@ -6,83 +15,80 @@ import os
 import sys
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QApplication, QDockWidget, QHBoxLayout, QLabel, QLineEdit, QSizePolicy,
-                               QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
-                               QPushButton, QSplitter, QStackedWidget, QTabWidget, QToolBar,
-                               QVBoxLayout, QWidget, QDialog)
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtWidgets import (QApplication, QInputDialog, QLabel, QLineEdit, QMessageBox,
+                               QTreeWidgetItem, QVBoxLayout, QWidget)
+
+from bricks_qt import Ctx, build, load_file
+from bricks_qt import theme as _theme
+from bricks_qt.app import BricksWindow
+from bricks_qt.remotefiles import RemoteFiles
+from bricks_qt.terminal import Terminal
 
 from .config import AppConfig, HostProfile
 from .dialogs import HostDialog, SessionManager
-from .files import FileBrowser
 from .session import SSHError, SSHSession
-from .term import TerminalView
+
+UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
+DEFAULT_FONT = 12
 
 
-class SessionTab(QWidget):
-    """一个会话标签：终端 / 文件面板 二选一（切换式，不再左右分栏）。"""
+def _apply_ui_font(app: Optional[QApplication] = None) -> dict:
+    """统一中文字体 + Fusion 风格（bricks_qt.theme.apply 的旧名，测试还在用）。"""
+    return _theme.apply(app)
 
-    status = Signal(str)
-    failed = Signal(str)
 
-    def __init__(self, profile: HostProfile, cfg: AppConfig, parent=None):
-        super().__init__(parent)
+def _emit(msg: str) -> None:
+    """冻结成窗口版 exe 时 stdout 是 None，这里兜住。"""
+    try:
+        if sys.stdout is None:
+            return
+        sys.stdout.write(str(msg) + "\n")
+        sys.stdout.flush()
+    except Exception:                       # noqa: BLE001
+        pass
+
+
+class SessionPage:
+    """一个会话页：由 ui/session.ui 渲染出「终端 / 文件」，这里只负责连和不连。"""
+
+    def __init__(self, profile: HostProfile, cfg: AppConfig, host_ctx: Ctx):
         self.profile = profile
         self.cfg = cfg
+        node = load_file(os.path.join(UI_DIR, "session.ui"))
+        sub = Ctx(base_dir=UI_DIR, asset_roots=host_ctx.asset_roots)
+        sub.handlers = host_ctx.handlers          # 动作表共享，控件引用各自独立
+        self.ctx = sub
+        self.widget = build(node, sub)
+        if self.widget is None:
+            raise RuntimeError("session.ui 渲染失败")
+        self.term: Terminal = sub.refs["term"]
+        self.files: RemoteFiles = sub.refs["files"]
+        self.pages = sub.refs["pages"]
         self.session: Optional[SSHSession] = None
+        self.term.set_font_size(int(profile.font_size or cfg.font_size or DEFAULT_FONT))
 
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
+    # ---- 兼容旧接口（测试/脚本用）----
+    @property
+    def browser(self) -> RemoteFiles:
+        return self.files
 
-        sw = QHBoxLayout()
-        sw.setContentsMargins(8, 6, 8, 6)
-        sw.setSpacing(0)
-        self.btn_term = QPushButton("终端")
-        self.btn_files = QPushButton("文件")
-        seg_qss = ("QPushButton{border:1px solid #d0d5dd;background:#fff;color:#333;"
-                   "padding:3px 16px;font-size:12px}"
-                   "QPushButton:checked{background:#1677ff;color:#fff;border-color:#1677ff}"
-                   "QPushButton:disabled{color:#bbb;border-color:#e5e7eb}")
-        for b in (self.btn_term, self.btn_files):
-            b.setCheckable(True)
-            b.setAutoExclusive(True)
-            b.setFixedHeight(28)
-            b.setCursor(Qt.PointingHandCursor)
-            b.setStyleSheet(seg_qss)
-            b.setFocusPolicy(Qt.NoFocus)
-            sw.addWidget(b)
-        self.btn_term.setChecked(True)
-        self.btn_term.clicked.connect(lambda: self.show_files(False))
-        self.btn_files.clicked.connect(lambda: self.show_files(True))
-        sw.addSpacing(10)
-        self.switch_hint = QLabel("Ctrl+` 切换终端 / 文件")
-        self.switch_hint.setStyleSheet("color:#9aa0a6;font-size:11px")
-        sw.addWidget(self.switch_hint)
-        sw.addStretch(1)
-        lay.addLayout(sw)
+    def show_files(self, on: bool) -> None:
+        try:
+            self.pages.setCurrentIndex(1 if on else 0)
+        except Exception:                     # noqa: BLE001
+            pass
+        if not on:
+            self.term.setFocus()
 
-        self.stack = QStackedWidget()
-        self.term = TerminalView(self, cfg.font_family, profile.font_size or cfg.font_size)
-        self.stack.addWidget(self.term)
-        lay.addWidget(self.stack, 1)
-        self.browser: Optional[FileBrowser] = None
-        self.term.connected_changed.connect(self._on_conn_changed)
-
-        from PySide6.QtGui import QShortcut, QKeySequence
-        sc = QShortcut(QKeySequence("Ctrl+`"), self)
-        sc.activated.connect(self.toggle_view)
-
-    def toggle_view(self) -> None:
-        self.show_files(self.stack.currentWidget() is self.term)
+    def set_font_size(self, size: int) -> None:
+        self.term.set_font_size(size)
 
     # ---- 连接 ----
     def ask_password(self) -> bool:
-        """配置里没存密码时，连之前先问用户要（密码默认不落盘）。"""
-        from PySide6.QtWidgets import QInputDialog, QLineEdit
         pwd, ok = QInputDialog.getText(
-            self, "需要密码",
+            self.widget, "需要密码",
             "%s@%s 的登录密码：" % (self.profile.user, self.profile.host),
             QLineEdit.Password)
         if not ok or not pwd:
@@ -90,11 +96,11 @@ class SessionTab(QWidget):
         self.profile.password = pwd
         return True
 
-    def connect(self) -> bool:
+    def connect(self) -> str:
+        """返回状态文字；失败抛 SSHError。"""
         if self.profile.auth == "password" and not self.profile.password:
             if not self.ask_password():
-                self.failed.emit("已取消：没有密码")
-                return False
+                raise SSHError("已取消：没有密码")
         QGuiApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             self.session = SSHSession(self.profile).connect()
@@ -102,429 +108,210 @@ class SessionTab(QWidget):
             self.term.attach_channel(chan)
             self.term._refresh_metrics()
             self.term._apply_size_to_chan()
-            self.show_files(False)          # 连上先看终端，文件按一下「文件」再切
-            self.status.emit("已连接 %s（%s）" % (self.profile.display(),
-                                                getattr(self.session, "host_key_status", "")))
-            return True
-        except SSHError as e:
-            self.failed.emit(str(e))
-            return False
+            self.files.attach(self.session)
+            self.show_files(False)
+            return "已连接 %s（%s）" % (self.profile.display(),
+                                      getattr(self.session, "host_key_status", ""))
         finally:
             QGuiApplication.restoreOverrideCursor()
 
-    def show_files(self, on: bool) -> None:
-        if on and self.browser is None and self.session is not None:
-            try:
-                self.browser = FileBrowser(self.session, self)
-                self.stack.addWidget(self.browser)
-            except Exception as e:                 # noqa: BLE001
-                self.failed.emit("打开文件面板失败：%s" % e)
-                self.btn_term.setChecked(True)
-                return
-        if on and self.browser is None:            # 还没连上，没有文件可看
-            self.btn_term.setChecked(True)
-            return
-        self.stack.setCurrentWidget(self.browser if on else self.term)
-        self.btn_files.setChecked(on)
-        self.btn_term.setChecked(not on)
-        if not on:
-            self.term.setFocus()
-
-    def set_font_size(self, size: int) -> None:
-        self.term.set_font_size(size)
-        self.profile.font_size = size
-
     def close_session(self) -> None:
-        self.term.detach()
-        if self.session:
-            self.session.close()
-        self.session = None
-
-    def _on_conn_changed(self, alive: bool) -> None:
-        if not alive:
-            self.status.emit("%s 已断开" % self.profile.display())
-
-
-class SessionRow(QWidget):
-    """会话列表的一行：名称（粗）+ 地址（灰）+ 跳板徽标，比两行裸文本好扫。"""
-
-    def __init__(self, h: HostProfile, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self._sel = False
-        self.setStyleSheet("background: transparent")
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(8, 6, 8, 6)
-        lay.setSpacing(2)
-        name = QLabel(h.name or "%s@%s" % (h.user, h.host))
-        f = name.font()
-        f.setBold(True)
-        name.setFont(f)
-        name.setStyleSheet("color:#1f1f1f")
-        lay.addWidget(name)
-        addr = QLabel("%s@%s:%s%s%s" % (h.user, h.host, h.port,
-                                        "  ·  密钥" if h.auth == "key" else "  ·  密码",
-                                        "  ·  跳板 %s" % h.jump_host if h.jump_host else ""))
-        addr.setStyleSheet("color:#767676; font-size:11px")
-        addr.setToolTip("%s@%s:%s" % (h.user, h.host, h.port))
-        lay.addWidget(addr)
-
-    def set_selected(self, on: bool) -> None:
-        if on == self._sel:
-            return
-        self._sel = on
-        self.setStyleSheet("background: %s; border-radius: 6px" % ("#dbe8ff" if on else "transparent"))
+        try:
+            self.term.detach()
+        except Exception:                      # noqa: BLE001
+            pass
+        if self.session is not None:
+            try:
+                self.session.close()
+            except Exception:                  # noqa: BLE001
+                pass
+            self.session = None
 
 
-class EmptyState(QWidget):
-    """没有打开会话时的引导页（原来是一大片空白）。"""
+class MainWindow(BricksWindow):
+    """主窗口：bricks .ui + 宿主动作。"""
 
-    new_requested = Signal()
-    import_requested = Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        lay = QVBoxLayout(self)
-        lay.setAlignment(Qt.AlignCenter)
-        lay.setSpacing(10)
-        title = QLabel("还没有打开的会话")
-        tf = title.font()
-        tf.setPointSize(tf.pointSize() + 6)
-        tf.setBold(True)
-        title.setFont(tf)
-        title.setAlignment(Qt.AlignCenter)
-        tip = QLabel("双击左侧会话直接连接，或点「新建会话」配置一台服务器。\n"
-                     "支持密钥免密 / 密码登录，跳板机在会话设置里填。")
-        tip.setAlignment(Qt.AlignCenter)
-        tip.setStyleSheet("color:#767676")
-        lay.addWidget(title)
-        lay.addWidget(tip)
-        row = QHBoxLayout()
-        row.setAlignment(Qt.AlignCenter)
-        b_new = QPushButton("＋  新建会话")
-        b_new.setStyleSheet("QPushButton{background:#1677ff;color:#fff;border:0;border-radius:4px;"
-                            "padding:8px 20px;font-weight:600}"
-                            "QPushButton:hover{background:#4096ff}")
-        b_new.clicked.connect(self.new_requested.emit)
-        b_imp = QPushButton("从 ~/.ssh/config 导入")
-        b_imp.clicked.connect(self.import_requested.emit)
-        row.addWidget(b_new)
-        row.addWidget(b_imp)
-        holder = QWidget()
-        holder.setLayout(row)
-        lay.addWidget(holder)
-
-
-class MainWindow(QMainWindow):
     def __init__(self, cfg: Optional[AppConfig] = None):
-        super().__init__()
         self.cfg = cfg or AppConfig.load()
-        self.setWindowTitle("sshdesk — SSH / SFTP 客户端")
+        ctx = Ctx(base_dir=UI_DIR)
+        node = load_file(os.path.join(UI_DIR, "main.ui"))
+        super().__init__(node, ctx, "sshdesk — SSH / SFTP 客户端（bricks）")
+        self.ctx = ctx
         self.resize(1280, 820)
 
-        # ---- 左侧会话列表 ----
-        dock = QDockWidget("会话", self)
-        # 浮动（标题栏小图标 / 双击标题栏）+ 关闭按钮 + 拖到任意边
-        dock.setFeatures(QDockWidget.DockWidgetMovable
-                         | QDockWidget.DockWidgetFloatable
-                         | QDockWidget.DockWidgetClosable)
-        dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
-        dock.setMinimumWidth(260)
-        box = QWidget()
-        bl = QVBoxLayout(box)
-        bl.setContentsMargins(4, 4, 4, 4)
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("过滤…")
-        self.search.textChanged.connect(self._fill_sessions)
-        bl.addWidget(self.search)
-        self.sessions = QListWidget()
-        self.sessions.setStyleSheet(
-            "QListWidget::item{padding:2px;border-radius:6px}"
-            "QListWidget::item:hover{background:#eef4ff}"
-            "QListWidget::item:selected{background:#dbe8ff}")
-        self.sessions.setSpacing(2)
-        self.sessions.itemDoubleClicked.connect(lambda _i: self.connect_current())
-        self.sessions.setContextMenuPolicy(Qt.ActionsContextMenu)
-        bl.addWidget(self.sessions, 1)
-        row = QHBoxLayout()
-        for text, fn, attr in (("＋ 新建", self.new_session, "btn_new"),
-                               ("管理", self.manage_sessions, "btn_manage"),
-                               ("连接", self.connect_current, "btn_connect")):
-            b = QPushButton(text)
-            b.clicked.connect(fn)
-            setattr(self, attr, b)
-            row.addWidget(b)
-        bl.addLayout(row)
-        dock.setWidget(box)
-        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
-        self.dock = dock
+        self.tree = ctx.refs["sessions"]            # QTreeWidget
+        self.tabs = ctx.refs["workspace"]           # QTabWidget
+        self.status_label: QLabel = ctx.refs["status"]
+        self.font_label: QLabel = ctx.refs["font_label"]
+        self.search = ctx.refs["search"]
+        self.pages_: List[SessionPage] = []
+        if hasattr(self.tree, "setHeaderLabels"):
+            self.tree.setHeaderLabels(["会话"])
 
-        # ---- 标签（无会话时显示引导页）----
-        self.tabs = QTabWidget()
-        self.tabs.setTabsClosable(True)
-        self.tabs.setMovable(True)
-        self.tabs.tabCloseRequested.connect(self.close_tab)
-        self.tabs.currentChanged.connect(self._focus_current_term)
-        self.empty = EmptyState()
-        self.empty.new_requested.connect(self.new_session)
-        self.empty.import_requested.connect(self.import_ssh_config)
-        self.stack = QStackedWidget()
-        self.stack.addWidget(self.empty)
-        self.stack.addWidget(self.tabs)
-        self.setCentralWidget(self.stack)
+        # .ui 里的 script 名字 → Python 函数
+        ctx.on("new_session", lambda *a: self.new_session())
+        ctx.on("manage_sessions", lambda *a: self.manage_sessions())
+        ctx.on("connect_selected", lambda *a: self.connect_selected())
+        ctx.on("reconnect", lambda *a: self.reconnect_current())
+        ctx.on("font_up", lambda *a: self.bump_font(+1))
+        ctx.on("font_down", lambda *a: self.bump_font(-1))
+        ctx.on("font_reset", lambda *a: self.set_font(DEFAULT_FONT))
+        ctx.on("filter_sessions", lambda n, e, text: self.fill_sessions(str(text or "")))
+        ctx.on("session_activated", lambda n, e, label: self.connect_by_name(str(label or "")))
+        ctx.on("close_tab", lambda n, e, idx: self.close_tab(int(idx)))
 
-        # ---- 工具栏 ----
-        tb = QToolBar("主工具栏")
-        tb.setMovable(False)
-        tb.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        self.addToolBar(tb)
+        self.font_label.setText("字号 %d" % self.cfg.font_size)
+        self.fill_sessions()
 
-        act_new = QAction("＋ 新建会话", self)
-        act_new.setToolTip("新建一个服务器会话（Ctrl+N）")
-        act_new.setShortcut(QKeySequence("Ctrl+N"))
-        act_new.triggered.connect(self.new_session)
-        tb.addAction(act_new)
-
-        self.act_dock = QAction("会话", self, checkable=True)
-        self.act_dock.setToolTip("显示 / 隐藏左侧会话窗（也可把它拖出去浮动）")
-        self.act_dock.setChecked(True)
-        self.act_dock.toggled.connect(lambda on: self.dock.setVisible(on))
-        self.dock.visibilityChanged.connect(self.act_dock.setChecked)
-        tb.addAction(self.act_dock)
-
-        tb.addSeparator()
-        self.act_reconnect = QAction("重连", self)
-        act_reconnect = self.act_reconnect
-        act_reconnect.setToolTip("断开当前标签并重新连接")
-        act_reconnect.triggered.connect(self.reconnect_current)
-        tb.addAction(act_reconnect)
-
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        tb.addWidget(spacer)
-
-        self.font_label = QLabel("字号 %d  " % self.cfg.font_size)
-        self.font_label.setToolTip("终端字号（Ctrl+= 放大 / Ctrl+- 缩小 / Ctrl+0 复位）")
-        tb.addWidget(self.font_label)
-        act_font_dn = QAction("A－", self)
-        act_font_dn.setToolTip("缩小字号 (Ctrl+-)")
-        act_font_dn.setShortcut(QKeySequence("Ctrl+-"))
-        act_font_dn.triggered.connect(lambda: self.bump_font(-1))
-        tb.addAction(act_font_dn)
-        act_font_up = QAction("A＋", self)
-        act_font_up.setToolTip("放大字号 (Ctrl+=)")
-        act_font_up.setShortcut(QKeySequence("Ctrl+="))
-        act_font_up.triggered.connect(lambda: self.bump_font(+1))
-        tb.addAction(act_font_up)
-        act_font_0 = QAction("复位", self)
-        act_font_0.setToolTip("字号恢复默认 (Ctrl+0)")
-        act_font_0.setShortcut(QKeySequence("Ctrl+0"))
-        act_font_0.triggered.connect(lambda: self.set_font(11))
-        tb.addAction(act_font_0)
-
-        self.sessions.currentItemChanged.connect(self._on_row_changed)
-        self.sessions.itemSelectionChanged.connect(
-            lambda: self.btn_connect.setEnabled(bool(self.sessions.selectedItems())))
-        self.statusBar().setContentsMargins(8, 0, 8, 0)
-        self.statusBar().showMessage("就绪")
-        self._sync_empty_state()
-        self._fill_sessions()
-
-    # ---- 会话列表 ----
-    def _fill_sessions(self) -> None:
-        kw = self.search.text().strip().lower()
-        self.sessions.clear()
+    # ---------------- 会话列表 ----------------
+    def fill_sessions(self, keyword: str = "") -> None:
+        kw = (keyword or "").strip().lower()
+        self.tree.clear()
         for h in self.cfg.hosts:
-            if kw and kw not in ("%s %s %s %s" % (h.name, h.host, h.user, h.jump_host)).lower():
+            blob = ("%s %s %s %s" % (h.name, h.user, h.host, h.jump_host or "")).lower()
+            if kw and kw not in blob:
                 continue
-            item = QListWidgetItem()
-            item.setData(Qt.UserRole, h)
-            item.setSizeHint(SessionRow(h).sizeHint())
-            self.sessions.addItem(item)
-            self.sessions.setItemWidget(item, SessionRow(h))
-
-    def _focus_current_term(self, _i: int) -> None:
-        w = self.tabs.currentWidget()
-        if isinstance(w, SessionTab):
-            w.term.setFocus()
-
-    def _on_row_changed(self, cur, prev) -> None:
-        for it in (prev, cur):
-            if it is None:
-                continue
-            w = self.sessions.itemWidget(it)
-            if isinstance(w, SessionRow):
-                w.set_selected(it is cur)
+            it = QTreeWidgetItem([h.name])
+            tip = "%s@%s:%s · %s" % (h.user, h.host, h.port,
+                                     "密码" if h.auth == "password" else "密钥")
+            if h.jump_host:
+                tip += " · 跳板 %s" % h.jump_host
+            it.setToolTip(0, tip)
+            it.setData(0, Qt.UserRole, h.name)
+            self.tree.addTopLevelItem(it)
 
     def _selected_host(self) -> Optional[HostProfile]:
-        item = self.sessions.currentItem()
-        return item.data(Qt.UserRole) if item else None
+        it = self.tree.currentItem()
+        if it is None:
+            return None
+        return self.cfg.by_name(it.data(0, Qt.UserRole) or it.text(0))
 
-    # ---- 动作 ----
+    def connect_selected(self) -> None:
+        h = self._selected_host()
+        if h is None:
+            self.status_label.setText("先在左侧选一个会话")
+            return
+        self.open_tab(h)
+
+    def connect_by_name(self, name: str) -> None:
+        h = self.cfg.by_name(name)
+        if h is not None:
+            self.open_tab(h)
+
+    # ---------------- 标签 ----------------
+    def open_tab(self, profile: HostProfile) -> None:
+        try:
+            page = SessionPage(profile, self.cfg, self.ctx)
+        except Exception as e:                      # noqa: BLE001
+            QMessageBox.warning(self, "渲染失败", str(e))
+            return
+        holder = QWidget()
+        lay = QVBoxLayout(holder)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(page.widget)
+        page.holder = holder
+        self.pages_.append(page)
+        self.tabs.addTab(holder, profile.name or profile.host)
+        self.tabs.setCurrentWidget(holder)
+
+        try:
+            self.status_label.setText(page.connect())
+        except SSHError as e:
+            self.status_label.setText("连接失败：%s" % e)
+            QMessageBox.warning(self, "连接失败", str(e))
+            self.close_tab(self.tabs.indexOf(holder), drop_only=True)
+            return
+        page.term.setFocus()
+
+    def close_tab(self, idx: int, drop_only: bool = False) -> None:
+        if idx is None or idx < 0 or idx >= self.tabs.count():
+            return
+        holder = self.tabs.widget(idx)
+        page = next((p for p in self.pages_ if getattr(p, "holder", None) is holder), None)
+        if page is not None:
+            try:
+                page.close_session()
+            except Exception:                       # noqa: BLE001
+                pass
+            self.pages_.remove(page)
+        self.tabs.removeTab(idx)
+        if not drop_only:
+            self.status_label.setText("已关闭会话")
+
+    # ---------------- 动作 ----------------
     def new_session(self) -> None:
-        dlg = HostDialog(None, self)
-        if dlg.exec() == QDialog.Accepted:
+        dlg = HostDialog(parent=self)
+        if dlg.exec():
             h = dlg.result_profile()
             self.cfg.upsert(h)
             self.cfg.save()
-            self._fill_sessions()
+            self.fill_sessions()
             self.open_tab(h)
-
-    def import_ssh_config(self) -> None:
-        dlg = SessionManager(self.cfg, self)
-        dlg._import_ssh()
-        self._fill_sessions()
 
     def manage_sessions(self) -> None:
         dlg = SessionManager(self.cfg, self)
-        if dlg.exec() == QDialog.Accepted and dlg.chosen:
-            self.open_tab(dlg.chosen)
-        self._fill_sessions()
-
-    def connect_current(self) -> None:
-        h = self._selected_host()
-        if h:
-            self.open_tab(h)
-        else:
-            QMessageBox.information(self, "连接", "先在左侧选一个会话")
-
-    def _sync_empty_state(self) -> None:
-        has_tabs = self.tabs.count() > 0
-        self.stack.setCurrentWidget(self.tabs if has_tabs else self.empty)
-        # 没有会话时，文件面板/重连 无用，禁用掉
-        for act in (getattr(self, "act_files", None), getattr(self, "act_reconnect", None)):
-            if act is not None:
-                act.setEnabled(has_tabs)
-        if hasattr(self, "btn_connect"):
-            self.btn_connect.setEnabled(bool(self.sessions.selectedItems()))
-
-    def open_tab(self, profile: HostProfile) -> None:
-        tab = SessionTab(profile, self.cfg, self)
-        tab.status.connect(lambda m: self.statusBar().showMessage(m, 8000))
-        tab.failed.connect(self._on_tab_failed)
-        idx = self.tabs.addTab(tab, profile.display())
-        self.tabs.setCurrentIndex(idx)
-        self._sync_empty_state()
-        ok = tab.connect()
-        if not ok:
-            self.tabs.removeTab(idx)
-            tab.deleteLater()
-            return
-        tab.term.setFocus()
-        for i in range(self.sessions.count()):
-            it = self.sessions.item(i)
-            if it.data(Qt.UserRole) is profile:
-                self.sessions.setCurrentItem(it)
-                break
-
-    def _on_tab_failed(self, msg: str) -> None:
-        self.statusBar().showMessage(msg, 10000)
-        QMessageBox.warning(self, "连接失败", msg)
-
-    def close_tab(self, idx: int) -> None:
-        w = self.tabs.widget(idx)
-        if isinstance(w, SessionTab):
-            w.close_session()
-        self.tabs.removeTab(idx)
-        if w:
-            w.deleteLater()
-        self._sync_empty_state()
+        dlg.exec()
+        self.cfg.save()
+        self.fill_sessions()
 
     def reconnect_current(self) -> None:
-        w = self.tabs.currentWidget()
-        if not isinstance(w, SessionTab):
+        holder = self.tabs.currentWidget()
+        page = next((p for p in self.pages_ if getattr(p, "holder", None) is holder), None)
+        if page is None:
+            self.status_label.setText("没有可重连的会话")
             return
-        w.close_session()
-        if not w.connect():
-            self.statusBar().showMessage("重连失败", 8000)
+        page.close_session()
+        try:
+            self.status_label.setText(page.connect())
+        except SSHError as e:
+            self.status_label.setText("重连失败：%s" % e)
 
-    def toggle_files(self, on: bool) -> None:
-        self.cfg.show_file_panel = on
-        self.cfg.save()
-        for i in range(self.tabs.count()):
-            w = self.tabs.widget(i)
-            if isinstance(w, SessionTab):
-                w.show_files(on)
-
-    # ---- 字体 ----
+    # ---------------- 字号 ----------------
     def bump_font(self, delta: int) -> None:
         self.set_font(self.cfg.font_size + delta)
 
     def set_font(self, size: int) -> None:
-        size = max(6, min(40, size))
+        size = max(6, min(40, int(size)))
         self.cfg.font_size = size
         self.cfg.save()
-        self.font_label.setText(" 字号 %d " % size)
-        for i in range(self.tabs.count()):
-            w = self.tabs.widget(i)
-            if isinstance(w, SessionTab):
-                w.set_font_size(size)
+        self.font_label.setText("字号 %d" % size)
+        for p in self.pages_:
+            p.set_font_size(size)
 
+    # ---------------- 生命周期 ----------------
     def closeEvent(self, e) -> None:                # noqa: N802
-        for i in range(self.tabs.count()):
-            w = self.tabs.widget(i)
-            if isinstance(w, SessionTab):
-                w.close_session()
-        self.cfg.save()
+        for p in list(self.pages_):
+            p.close_session()
+        try:
+            self.cfg.save()
+        except Exception:                           # noqa: BLE001
+            pass
         super().closeEvent(e)
 
 
-def _utf8_console() -> None:
-    """Windows 控制台默认 cp1252，打印中文会 UnicodeEncodeError；窗口版就没有 stdout。"""
-    for stream in (sys.stdout, sys.stderr):
-        if stream is None:
-            continue
-        try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, ValueError):
-            pass
-
-
-def _emit(msg: str) -> None:
-    try:
-        if sys.stdout is not None:
-            print(msg)
-    except Exception:                              # noqa: BLE001
-        pass
-
-
-def _apply_ui_font(app: QApplication) -> None:
-    """界面字体：优先中文字体，终端仍用等宽字体。"""
-    from PySide6.QtGui import QFont, QFontDatabase
-    fams = set(QFontDatabase.families())
-    for name in ("Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "PingFang SC"):
-        if name in fams:
-            app.setFont(QFont(name, 9))
-            return
-
-
 def main(argv: Optional[List[str]] = None) -> int:
-    _utf8_console()
-    argv = list(sys.argv if argv is None else argv)
+    argv = list(sys.argv[1:] if argv is None else argv)
     cfg = AppConfig.load()
-    app = QApplication(argv[:1])
-    app.setApplicationName("sshdesk")
-    app.setStyle("Fusion")
+    if "--list" in argv:
+        for h in cfg.hosts:
+            _emit("%-24s %s@%s:%s %s" % (h.name, h.user, h.host, h.port,
+                                         "密码" if h.auth == "password" else "密钥"))
+        return 0
+
+    app = QApplication.instance() or QApplication(sys.argv[:1])
     _apply_ui_font(app)
     win = MainWindow(cfg)
-    want = None
-    for a in argv[1:]:
-        if a in ("--list", "-l"):
-            for h in cfg.hosts:
-                _emit(h.display())
-            return 0
-        if not a.startswith("-"):
-            want = cfg.by_name(a)
-            if want is None:
-                _emit("找不到会话：%s" % a)
+
     if "--selftest" in argv:
-        from PySide6.QtCore import QTimer
+        win.setAttribute(Qt.WA_DontShowOnScreen, True)
         win.show()
-        QTimer.singleShot(1200, app.quit)
-        rc = app.exec()
-        _emit("selftest ok: %d 个会话，窗口正常起来" % len(cfg.hosts))
-        return rc
+        app.processEvents()
+        _emit("selftest ok: %d 个会话，窗口正常起来（bricks .ui）" % len(cfg.hosts))
+        return 0
+
     win.show()
-    if want is not None:
-        win.open_tab(want)
     return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
