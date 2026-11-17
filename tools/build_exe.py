@@ -44,6 +44,7 @@ def main() -> int:
             "--exclude-module", "pandas"]
     # .ui 界面文件（bricks 描述）必须随包走
     args += ["--add-data", os.path.join(ROOT, "sshdesk", "ui") + SEP + os.path.join("sshdesk", "ui")]
+    args += ["--add-data", os.path.join(ROOT, "assets") + SEP + "assets"]      # 图标（窗口图标运行时也要）
 
     if sys.platform == "darwin":
         args += ["--osx-bundle-identifier", "cn.kymoz.sshdesk"]

@@ -31,6 +31,20 @@ from .dialogs import HostDialog, SessionManager
 from .session import SSHError, SSHSession
 
 UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
+ASSETS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
+
+
+def _app_asset(name: str) -> str:
+    """打包后资源在 sys._MEIPASS 下，源码运行在仓库 assets/ 下。"""
+    cands = []
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        cands += [os.path.join(meipass, "assets", name), os.path.join(meipass, name)]
+    cands.append(os.path.join(ASSETS, name))
+    for p in cands:
+        if p and os.path.exists(p):
+            return p
+    return ""
 DEFAULT_FONT = 12
 
 
@@ -140,7 +154,7 @@ class MainWindow(BricksWindow):
         self.cfg = cfg or AppConfig.load()
         ctx = Ctx(base_dir=UI_DIR)
         node = load_file(os.path.join(UI_DIR, "main.ui"))
-        super().__init__(node, ctx, "sshdesk — SSH / SFTP 客户端（bricks）")
+        super().__init__(node, ctx, "sshdesk — SSH / SFTP 客户端")
         self.ctx = ctx
         self.resize(1280, 820)
 
@@ -165,6 +179,10 @@ class MainWindow(BricksWindow):
         ctx.on("session_activated", lambda n, e, label: self.connect_by_name(str(label or "")))
         ctx.on("close_tab", lambda n, e, idx: self.close_tab(int(idx)))
 
+        icon = _app_asset("sshdesk.png") or _app_asset("sshdesk.ico")
+        if icon:
+            from PySide6.QtGui import QIcon
+            self.setWindowIcon(QIcon(icon))
         self.font_label.setText("字号 %d" % self.cfg.font_size)
         self.fill_sessions()
 
