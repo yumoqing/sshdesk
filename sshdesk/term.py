@@ -42,7 +42,7 @@ class TerminalView(QWidget):
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self._font_family = font_family
         self._font_size = font_size
-        self._screen = pyte.Screen(100, 30)
+        self._screen = pyte.HistoryScreen(100, 30, history=5000)   # 带 5000 行回滚历史
         self._stream = pyte.ByteStream(self._screen)
         self._chan = None
         self._reader: Optional[threading.Thread] = None
@@ -147,6 +147,21 @@ class TerminalView(QWidget):
         self._apply_size_to_chan()
         self.update()
 
+    # ---------------- 历史回滚 ----------------
+    def scroll_history(self, pages: int) -> None:
+        try:
+            for _ in range(abs(pages)):
+                if pages > 0:
+                    self._screen.prev_page()
+                else:
+                    self._screen.next_page()
+        except Exception:                        # noqa: BLE001
+            pass
+        self.update()
+
+    def wheelEvent(self, e) -> None:             # noqa: N802
+        self.scroll_history(1 if e.angleDelta().y() > 0 else -1)
+
     def keyPressEvent(self, e: QKeyEvent) -> None:       # noqa: N802
         mods, key = e.modifiers(), e.key()
         if mods & Qt.ControlModifier and mods & Qt.ShiftModifier:
@@ -156,6 +171,9 @@ class TerminalView(QWidget):
             if key == Qt.Key_V:                          # Ctrl+Shift+V 粘贴
                 self.send(QApplication.clipboard().text().encode("utf-8"))
                 return
+        if key in (Qt.Key_PageUp, Qt.Key_PageDown) and (mods & Qt.ShiftModifier):
+            self.scroll_history(1 if key == Qt.Key_PageUp else -1)
+            return
         if key in KEYS:
             self.send(KEYS[key])
             return
@@ -219,6 +237,15 @@ class TerminalView(QWidget):
                 f.setBold(bool(cell.bold))
                 p.setFont(f)
                 p.drawText(QPointF(start * self._cell_w, y * self._cell_h + self._cell_h * 0.78), run)
+        # 回滚提示
+        try:
+            if self._screen.history.position != 0:
+                p.setPen(QColor("#f9f1a5"))
+                p.drawText(QRectF(0, self.height() - self._cell_h, self.width(), self._cell_h),
+                           Qt.AlignRight | Qt.AlignVCenter,
+                           "历史 -%d 屏   ⤓ Shift+PgDn 回到底部 " % self._screen.history.position)
+        except Exception:                        # noqa: BLE001
+            pass
         # 光标
         if self._blink:
             cx, cy = self._screen.cursor.x, self._screen.cursor.y

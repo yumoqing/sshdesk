@@ -18,7 +18,7 @@ import queue
 import threading
 from typing import Callable, List, Optional, Tuple
 
-from .config import HostProfile
+from .config import HostProfile, known_hosts_path
 
 def _import_sshx():
     """优先用已安装/已在 PYTHONPATH 的 appPublic；找不到就试几个常见仓库位置。"""
@@ -165,12 +165,74 @@ class SSHSession:
             if "Permission denied" in str(e) or "authentication" in str(e).lower():
                 raise SSHError("认证失败：%s" % str(e)[:160])
             raise
+        try:
+            self.host_key_status = self._check_host_key()
+        except SSHError:
+            self.close()
+            raise
         except Exception as e:                    # noqa: BLE001
             msg = str(e)
             if "Permission denied" in msg or "authentication" in msg.lower():
                 raise SSHError("认证失败：%s" % msg[:160])
             raise SSHError("连接 %s:%s 失败：%s" % (p.host, p.port or 22, msg[:200]))
         return self
+
+    # ---------- 主机密钥 ----------
+    def _host_entry(self) -> str:
+        p = self.profile
+        port = p.port or 22
+        return p.host if port == 22 else "[%s]:%d" % (p.host, port)
+
+    def _fetch_host_key(self):
+        """返回 (keytype, base64)；连上后才有。"""
+        key = self.node.conn.get_server_host_key()
+        pub = key.export_public_key("openssh")
+        pub = pub.decode() if isinstance(pub, bytes) else pub
+        parts = pub.split()
+        return parts[0], parts[1]
+
+    def _check_host_key(self) -> str:
+        """auto：首连记录、之后比对；strict：不在文件里直接拒绝。返回 key type。"""
+        entry = self._host_entry()
+        ktype, b64 = self._fetch_host_key()
+        path = known_hosts_path()
+        lines = []
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                lines = [l.rstrip("\n") for l in fh if l.strip()]
+        known = {}
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 3:
+                known[(parts[0], parts[1])] = parts[2]
+        old = known.get((entry, ktype))
+        mode = (self.profile.hostkey or "auto").lower()
+        if old is None:
+            if mode == "strict":
+                raise SSHError(
+                    "未知主机密钥（%s %s，指纹见下），严格模式下拒绝连接：\n%s" %
+                    (entry, ktype, self.fingerprint_hint(entry, ktype, b64)))
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write("%s %s %s\n" % (entry, ktype, b64))
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+            return "新增信任：%s %s（已写入 known_hosts）" % (entry, ktype)
+        if old != b64:
+            raise SSHError(
+                "主机密钥变了！可能被中间人劫持：\n  期望 %s...\n  实际 %s...\n"
+                "确认无误后删掉 %s 里对应行再连。" % (old[:24], b64[:24], path))
+        return "主机密钥校验通过：%s %s" % (entry, ktype)
+
+    @staticmethod
+    def fingerprint_hint(entry: str, ktype: str, b64: str) -> str:
+        import base64
+        import hashlib
+        raw = base64.b64decode(b64)
+        digest = base64.b64encode(hashlib.sha256(raw).digest()).decode().rstrip("=")
+        return "  %s %s SHA256:%s" % (entry, ktype, digest)
 
     def close(self) -> None:
         try:

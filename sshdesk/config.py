@@ -9,6 +9,10 @@ from typing import Dict, List, Optional
 
 
 def config_dir() -> str:
+    override = os.environ.get("SSHDESK_CONFIG_DIR")
+    if override:
+        os.makedirs(override, exist_ok=True)
+        return override
     base = os.environ.get("APPDATA") or os.path.expanduser("~/.config")
     d = os.path.join(base, "sshdesk")
     os.makedirs(d, exist_ok=True)
@@ -17,6 +21,10 @@ def config_dir() -> str:
 
 def config_path() -> str:
     return os.path.join(config_dir(), "hosts.json")
+
+
+def known_hosts_path() -> str:
+    return os.path.join(config_dir(), "known_hosts")
 
 
 @dataclass
@@ -40,7 +48,8 @@ class HostProfile:
     # 终端
     font_size: int = 11
     font_family: str = "Consolas"
-    # 首次连接时是否自动接受主机密钥
+    # 主机密钥策略：auto=首连信任并记录(TOFU)；strict=必须与 known_hosts 一致
+    hostkey: str = "auto"
     auto_add_key: bool = True
 
     def display(self) -> str:

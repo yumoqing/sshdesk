@@ -87,6 +87,11 @@ class HostDialog(QDialog):
         pr.addWidget(show)
         ag.addRow("密码", self.pass_row)
 
+        self.hostkey = QComboBox()
+        self.hostkey.addItems(["自动：首连信任并记录（TOFU）", "严格：必须与 known_hosts 一致"])
+        self.hostkey.setCurrentIndex(0 if (p.hostkey or "auto") == "auto" else 1)
+        ag.addRow("主机密钥", self.hostkey)
+
         self.remember = QCheckBox("记住密码（写入本地配置文件，仅当前用户可读）")
         self.remember.setChecked(p.remember_password)
         ag.addRow("", self.remember)
@@ -163,6 +168,7 @@ class HostDialog(QDialog):
             key_path=self.key_path.text().strip(), key_passphrase=self.key_pass.text(),
             password=self.password.text() if self.auth.currentIndex() == 1 else "",
             remember_password=self.remember.isChecked(),
+            hostkey="auto" if self.hostkey.currentIndex() == 0 else "strict",
             font_size=self.font_size.value())
         if self.jump_box.isChecked():
             p.jump_host = self.jump_host.text().strip()

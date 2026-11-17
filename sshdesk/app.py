@@ -53,7 +53,8 @@ class SessionTab(QWidget):
             self.term._apply_size_to_chan()
             if self.cfg.show_file_panel:
                 self.show_files(True)
-            self.status.emit("已连接 %s" % self.profile.display())
+            self.status.emit("已连接 %s（%s）" % (self.profile.display(),
+                                                getattr(self.session, "host_key_status", "")))
             return True
         except SSHError as e:
             self.failed.emit(str(e))

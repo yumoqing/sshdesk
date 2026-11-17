@@ -48,6 +48,7 @@ def sha256(path: str) -> str:
 
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="sshdesk_test_")
+    os.environ["SSHDESK_CONFIG_DIR"] = os.path.join(tmp, "cfg")
     sftp_root = os.path.join(tmp, "sftp")
     os.makedirs(sftp_root, exist_ok=True)
 
@@ -144,6 +145,68 @@ def main() -> int:
             raise AssertionError("shell 没回显：%r" % buf[:120])
         finally:
             s.close()
+
+    def t_hostkey():
+        from sshdesk.config import known_hosts_path
+        from sshdesk.session import SSHSession, SSHError
+        kh = known_hosts_path()
+        if os.path.exists(kh):
+            os.remove(kh)
+        strict = HostProfile(auth="key", key_path=key_path, hostkey="strict", **base)
+        try:
+            SSHSession(strict).connect()
+        except SSHError as e:
+            assert "未知主机密钥" in str(e), str(e)[:120]
+        else:
+            raise AssertionError("严格模式不该放行未知主机")
+        auto = HostProfile(auth="key", key_path=key_path, hostkey="auto", **base)
+        s1 = SSHSession(auto).connect()
+        assert "新增信任" in s1.host_key_status, s1.host_key_status
+        s1.close()
+        assert os.path.isfile(kh), "known_hosts 没写出来"
+        s2 = SSHSession(auto).connect()
+        assert "校验通过" in s2.host_key_status, s2.host_key_status
+        s2.close()
+        # 篡改 → 必须拒绝
+        lines = [l for l in open(kh, encoding="utf-8").read().splitlines() if l.strip()]
+        parts = lines[0].split()
+        parts[2] = "AAAAB3NzaC1yc2EAAAADAQABAAAAgQCtampered0000000000000000"
+        open(kh, "w", encoding="utf-8").write(" ".join(parts) + "\n")
+        try:
+            SSHSession(auto).connect()
+        except SSHError as e:
+            assert "主机密钥变了" in str(e), str(e)[:120]
+        else:
+            raise AssertionError("密钥被篡改还放行了")
+        open(kh, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+
+    check("主机密钥 strict/TOFU/篡改检测", t_hostkey)
+
+    def t_scrollback():
+        from sshdesk.term import TerminalView
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtCore import QSize
+        app = QApplication.instance() or QApplication(sys.argv[:1])
+        tv = TerminalView(None, "Consolas", 10)
+        tv.resize(QSize(600, 300))
+        tv.show()
+        app.processEvents()
+        for i in range(200):
+            tv._stream.feed(("line-%03d\r\n" % i).encode())
+        app.processEvents()
+        tail = tv.selected_text()
+        assert "line-199" in tail, "最新内容不在当前页"
+        tv.scroll_history(3)          # 往上翻 3 屏
+        app.processEvents()
+        back = tv.selected_text()
+        assert "line-199" not in back, "回滚后不该还显示最新行"
+        assert any("line-%03d" % i in back for i in range(120, 190)), back[:120]
+        tv.scroll_history(-99)        # 回到底部
+        app.processEvents()
+        assert "line-199" in tv.selected_text(), "回到底部失败"
+        tv.close()
+
+    check("终端滚动历史回看", t_scrollback)
 
     check("密码登录 + exec", t_password)
     check("密钥登录（免密）+ exec", t_key)
