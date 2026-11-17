@@ -180,6 +180,9 @@ class TerminalView(QWidget):
             if mods & Qt.ShiftModifier:                   # 没选中时 Ctrl+Shift+C 复制整屏
                 QGuiApplication.clipboard().setText(self.screen_text())
                 return
+        if key == Qt.Key_A and (mods & Qt.ControlModifier) and (mods & Qt.ShiftModifier):
+            self.select_all()
+            return
         if key == Qt.Key_Insert and (mods & Qt.ControlModifier):
             self.copy_selection()
             return
@@ -265,15 +268,28 @@ class TerminalView(QWidget):
     def paste(self) -> None:
         self.send(QGuiApplication.clipboard().text().encode("utf-8"))
 
+    def focusInEvent(self, e) -> None:                     # noqa: N802
+        self.update()
+        super().focusInEvent(e)
+
+    def showEvent(self, e) -> None:                        # noqa: N802
+        super().showEvent(e)
+        self.setFocus(Qt.OtherFocusReason)                 # 切过来就能直接敲
+
     def mousePressEvent(self, e) -> None:                  # noqa: N802
+        self.setFocus(Qt.MouseFocusReason)                 # 关键：点击即取焦点
         if e.button() == Qt.LeftButton:
             self._sel_a = self._cell_at(e.position())
             self._sel_b = self._sel_a
             self._selecting = True
             self.update()
+            e.accept()
+            return
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e) -> None:                   # noqa: N802
+        if not self._selecting and (e.buttons() & Qt.LeftButton) and self._sel_a is not None:
+            self._selecting = True
         if self._selecting:
             self._sel_b = self._cell_at(e.position())
             self.update()
@@ -381,7 +397,7 @@ class TerminalView(QWidget):
         if rng and self.has_selection():
             (r1, c1), (r2, c2) = rng
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(38, 79, 120, 190))
+            p.setBrush(QColor(58, 110, 165, 210))
             for r in range(r1, r2 + 1):
                 lo = c1 if r == r1 else 0
                 hi = c2 if r == r2 else cols - 1

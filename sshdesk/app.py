@@ -264,6 +264,7 @@ class MainWindow(QMainWindow):
         self.tabs.setTabsClosable(True)
         self.tabs.setMovable(True)
         self.tabs.tabCloseRequested.connect(self.close_tab)
+        self.tabs.currentChanged.connect(self._focus_current_term)
         self.empty = EmptyState()
         self.empty.new_requested.connect(self.new_session)
         self.empty.import_requested.connect(self.import_ssh_config)
@@ -341,6 +342,11 @@ class MainWindow(QMainWindow):
             item.setSizeHint(SessionRow(h).sizeHint())
             self.sessions.addItem(item)
             self.sessions.setItemWidget(item, SessionRow(h))
+
+    def _focus_current_term(self, _i: int) -> None:
+        w = self.tabs.currentWidget()
+        if isinstance(w, SessionTab):
+            w.term.setFocus()
 
     def _on_row_changed(self, cur, prev) -> None:
         for it in (prev, cur):
