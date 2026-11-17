@@ -298,6 +298,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             want = cfg.by_name(a)
             if want is None:
                 print("找不到会话：%s" % a, file=sys.stderr)
+    if "--selftest" in argv:
+        from PySide6.QtCore import QTimer
+        win.show()
+        QTimer.singleShot(1200, app.quit)
+        rc = app.exec()
+        print("selftest ok: %d 个会话，窗口正常起来" % len(cfg.hosts))
+        return rc
     win.show()
     if want is not None:
         win.open_tab(want)

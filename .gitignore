@@ -8,3 +8,5 @@ tests/_fake_host_key
 tests/_tmp/
 serve.log
 out_test.log
+*.spec
+out/cfg/
