@@ -114,6 +114,19 @@ class ShellChannel:
         except Exception:                         # noqa: BLE001
             pass
 
+    def send_nowait(self, data: bytes) -> None:
+        """不阻塞调用线程的写：排到 asyncio 循环里就返回（终端敲键走这条）。"""
+        async def _w():
+            try:
+                self.proc.stdin.write(data)
+                await self.proc.stdin.drain()
+            except Exception:                    # noqa: BLE001
+                pass
+        try:
+            asyncio.run_coroutine_threadsafe(_w(), self.loop.loop)
+        except Exception:                        # noqa: BLE001
+            pass
+
     def resize_pty(self, width: int, height: int) -> None:
         try:
             self.proc.change_terminal_size(width, height)

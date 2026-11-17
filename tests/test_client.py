@@ -258,7 +258,13 @@ def main() -> int:
         tab.show_files(True)
         app.processEvents()
         assert tab.browser is not None, "文件面板没建起来"
-        assert tab.browser.remote.cwd, "远端目录为空"
+        assert tab.browser.cwd, "远端目录为空"
+        assert tab.browser.table.rowCount() >= 1, "远端目录没有条目"
+        # 根目录本身没有上级，就不该有 ".."；进子目录才要
+        names = [tab.browser.table.item(r, 0).text() for r in range(tab.browser.table.rowCount())]
+        assert names, "远端目录为空"
+        assert tab.browser.cwd == "/" and ".." not in names, \
+            "根目录不该有 ..：%r" % names[:3]
 
         # 终端内容断言（窗口截图对自绘控件不可靠，另存一张终端单独的图作证据）
         screen_text = tab.term.selected_text()
@@ -315,6 +321,122 @@ def main() -> int:
         tv.close()
 
     check("终端彩色输出渲染", t_color)
+
+    # ---------- 目录交互：.. / 双击进入 ----------
+    def t_nav():
+        from PySide6.QtCore import QSize, Qt
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication(sys.argv[:1])
+        prof = key_prof
+        sess = SSHSession(prof).connect()
+        from sshdesk.files import FileBrowser
+        fb = FileBrowser(sess)
+        fb.resize(QSize(700, 500))
+        app.processEvents()
+        names = [fb.table.item(r, 0).text() for r in range(fb.table.rowCount())]
+        assert "sub" in names, "远端根目录里没有 sub：%r" % names[:6]
+        root = fb.cwd
+        # 双击 sub 进入
+        row = names.index("sub")
+        fb._on_double(fb.table.model().index(row, 0))
+        app.processEvents()
+        assert fb.cwd.rstrip("/").endswith("sub"), "双击没进目录：%s" % fb.cwd
+        names2 = [fb.table.item(r, 0).text() for r in range(fb.table.rowCount())]
+        assert names2[0] == "..", "子目录里没有 ..：%r" % names2[:3]
+        # 双击 .. 回上级
+        fb._on_double(fb.table.model().index(0, 0))
+        app.processEvents()
+        assert fb.cwd == root, ".. 没回上级：%s != %s" % (fb.cwd, root)
+        sess.close()
+
+    check("目录 .. / 双击进入", t_nav)
+
+    # ---------- 拖入上传 ----------
+    def t_drop_upload():
+        from PySide6.QtCore import QMimeData, QSize, QUrl, Qt
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication(sys.argv[:1])
+        sess = SSHSession(key_prof).connect()
+        from sshdesk.files import FileBrowser
+        fb = FileBrowser(sess)
+        fb.resize(QSize(700, 500))
+        fb.chdir("/")
+        app.processEvents()
+        local = os.path.join(tmp, "拖入测试.txt")
+        with open(local, "w", encoding="utf-8") as fh:
+            fh.write("dropped 内容 123")
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(local)])
+
+        class _Ev:
+            def __init__(self, m):
+                self._m = m
+
+            def mimeData(self):
+                return self._m
+
+            def setDropAction(self, a):
+                pass
+
+            def accept(self):
+                pass
+
+        fb.table.dropEvent(_Ev(mime))
+        for _ in range(60):
+            app.processEvents()
+            time.sleep(0.05)
+            if os.path.basename(local) in [r[0] for r in sess.listdir("/")]:
+                break
+        names = [r[0] for r in sess.listdir("/")]
+        assert "拖入测试.txt" in names, "拖入上传没落地：%r" % names
+        assert sess.stat_size("/拖入测试.txt") == len("dropped 内容 123".encode()), "上传内容长度不对"
+
+        # 拖出：下到临时目录
+        got = fb._fetch_to_temp(["拖入测试.txt"])
+        assert got and os.path.isfile(got[0]), "拖出下载失败：%r" % got
+        assert open(got[0], encoding="utf-8").read() == "dropped 内容 123", "拖出内容不对"
+        sess.remove("/拖入测试.txt")
+        sess.close()
+
+    check("拖拽上传 / 拖出下载", t_drop_upload)
+
+    # ---------- 中文输入（走输入法提交）----------
+    def t_ime():
+        from PySide6.QtCore import QSize, Qt
+        from PySide6.QtGui import QInputMethodEvent
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication(sys.argv[:1])
+        prof = key_prof
+        sess = SSHSession(prof).connect()
+        from sshdesk.term import TerminalView
+        tv = TerminalView(font_family="Consolas", font_size=12)
+        tv.resize(QSize(700, 300))
+        tv.setAttribute(Qt.WA_DontShowOnScreen, True)
+        tv.show()
+        tv._refresh_metrics()
+        chan = sess.open_shell(tv._screen.columns, tv._screen.lines)
+        tv.attach_channel(chan)
+        for _ in range(20):
+            app.processEvents()
+            time.sleep(0.03)
+        ev = QInputMethodEvent()
+        ev.setCommitString("中文输入测试")
+        tv.inputMethodEvent(ev)
+        app.processEvents()
+        from PySide6.QtGui import QKeyEvent
+        tv.keyPressEvent(QKeyEvent(QKeyEvent.KeyPress, Qt.Key_Return, Qt.NoModifier))
+        deadline = time.time() + 6
+        while time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.03)
+            if "中文输入测试" in tv.screen_text():
+                break
+        txt = tv.screen_text()
+        assert "中文输入测试" in txt, "中文没发出去/没回显：%r" % txt[-80:]
+        tv.detach()
+        sess.close()
+
+    check("终端中文输入", t_ime)
 
     check("多标签 + 字体缩放 + 文件面板", t_gui)
 

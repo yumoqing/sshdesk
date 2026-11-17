@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import queue
 import threading
 from typing import Optional
 
 import pyte
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QPointF, QRectF, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QKeyEvent, QPainter, QPaintEvent,
                            QResizeEvent, QGuiApplication)
 from PySide6.QtWidgets import QApplication, QWidget
@@ -93,6 +94,8 @@ class TerminalView(QWidget):
         self._screen = pyte.HistoryScreen(100, 30, history=5000)   # 带 5000 行回滚历史
         self._stream = pyte.ByteStream(self._screen)
         self._chan = None
+        self._inbox: "queue.Queue[Optional[bytes]]" = queue.Queue()
+        self._preedit = ""
         self._reader: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._cell_w = 8.0
@@ -111,6 +114,12 @@ class TerminalView(QWidget):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._on_blink)
         self._timer.start(600)
+        # 60fps 批量消费：一次 tick 把所有排队的输出一口气喂进 pyte，只重绘一次。
+        # 原来每块数据都从工作线程里 singleShot 一次 update()，输出一多就堆成几千个定时器 → 明显卡顿。
+        self._tick = QTimer(self)
+        self._tick.timeout.connect(self._drain)
+        self._tick.start(16)
+        self.setAttribute(Qt.WA_InputMethodEnabled, True)   # 中文输入法要这个
 
     # ---------------- 字体 ----------------
     def font_size(self) -> int:
@@ -160,10 +169,16 @@ class TerminalView(QWidget):
     def attach_channel(self, chan) -> None:
         self._chan = chan
         self._stop.clear()
+        while True:                                  # 换通道时丢掉旧残留
+            try:
+                self._inbox.get_nowait()
+            except queue.Empty:
+                break
         self._reader = threading.Thread(target=self._read_loop, args=(chan,), daemon=True)
         self._reader.start()
 
     def _read_loop(self, chan) -> None:
+        """工作线程：只把数据塞进队列，绝不碰 pyte 屏幕（避免与绘制线程抢状态）。"""
         while not self._stop.is_set():
             try:
                 data = chan.recv(65536)
@@ -171,9 +186,30 @@ class TerminalView(QWidget):
                 break
             if not data:
                 break
-            self._stream.feed(data)
-            QTimer.singleShot(0, self.update)       # 回主线程重绘
-        QTimer.singleShot(0, lambda: self.connected_changed.emit(False))
+            self._inbox.put(data)
+        self._inbox.put(None)                       # 结束标记
+
+    def _drain(self) -> None:
+        """GUI 线程：把排队输出一次性喂进去，只重绘一次。"""
+        fed = 0
+        closed = False
+        while fed < 512 * 1024:
+            try:
+                data = self._inbox.get_nowait()
+            except queue.Empty:
+                break
+            if data is None:
+                closed = True
+                continue
+            try:
+                self._stream.feed(data)
+                fed += len(data)
+            except Exception:                       # noqa: BLE001
+                pass
+        if fed:
+            self.update()
+        if closed:
+            self.connected_changed.emit(False)
 
     def detach(self) -> None:
         self._stop.set()
@@ -188,7 +224,11 @@ class TerminalView(QWidget):
         if self._chan is None:
             return
         try:
-            self._chan.sendall(data)
+            fn = getattr(self._chan, "send_nowait", None)
+            if fn is not None:
+                fn(data)                            # 不阻塞 GUI 线程
+            else:
+                self._chan.sendall(data)
         except Exception:                           # noqa: BLE001
             pass
 
@@ -218,6 +258,33 @@ class TerminalView(QWidget):
 
     def wheelEvent(self, e) -> None:             # noqa: N802
         self.scroll_history(1 if e.angleDelta().y() > 0 else -1)
+
+    # ---------------- 输入法（中文） ----------------
+    def inputMethodQuery(self, query):                    # noqa: N802
+        cx, cy = self._screen.cursor.x, self._screen.cursor.y
+        if query == Qt.ImCursorRectangle:
+            return QRect(int(self._pad_x + cx * self._cell_w),
+                         int(self._pad_y + cy * self._cell_h),
+                         int(self._cell_w), int(self._cell_h))
+        if query == Qt.ImCursorPosition:
+            return cx
+        if query == Qt.ImAnchorPosition:
+            return cx
+        if query == Qt.ImSurroundingText:
+            return "\n".join(self._screen.display)
+        if query == Qt.ImCurrentSelection:
+            return self.selection_text()
+        if query == Qt.ImEnabled:
+            return True
+        return None
+
+    def inputMethodEvent(self, e) -> None:                 # noqa: N802
+        commit = e.commitString()
+        if commit:
+            self.send(commit.encode("utf-8"))
+        self._preedit = e.preeditString() or ""
+        self.update()
+        e.accept()
 
     def keyPressEvent(self, e: QKeyEvent) -> None:       # noqa: N802
         mods, key = e.modifiers(), e.key()
@@ -318,6 +385,12 @@ class TerminalView(QWidget):
     def focusInEvent(self, e) -> None:                     # noqa: N802
         self.update()
         super().focusInEvent(e)
+
+    def focusOutEvent(self, e) -> None:                    # noqa: N802
+        if self._preedit:
+            self._preedit = ""
+            self.update()
+        super().focusOutEvent(e)
 
     def showEvent(self, e) -> None:                        # noqa: N802
         super().showEvent(e)
@@ -477,6 +550,17 @@ class TerminalView(QWidget):
                 p.drawText(box, Qt.AlignCenter, msg)
         except Exception:                        # noqa: BLE001
             pass
+        # 输入法未上屏的串（拼音/候选）就画在光标处
+        if self._preedit:
+            cx, cy = self._screen.cursor.x, self._screen.cursor.y
+            adv = len(self._preedit) * self._cell_w
+            box = QRectF(px + cx * self._cell_w, py + cy * self._cell_h, adv, self._cell_h)
+            p.fillRect(box, QColor("#3a3a3a"))
+            p.setPen(QColor("#f9f1a5"))
+            p.drawText(QPointF(px + cx * self._cell_w,
+                               py + cy * self._cell_h + self._cell_h * 0.78), self._preedit)
+            p.drawLine(QPointF(box.left(), box.bottom() - 1), QPointF(box.right(), box.bottom() - 1))
+
         # 光标
         if self._blink and not getattr(self._screen.cursor, "hidden", False):
             cx, cy = self._screen.cursor.x, self._screen.cursor.y
