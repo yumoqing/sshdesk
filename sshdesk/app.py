@@ -21,7 +21,7 @@ from .term import TerminalView
 
 
 class SessionTab(QWidget):
-    """一个会话标签：左终端 + 右文件面板（可隐藏）。"""
+    """一个会话标签：终端 / 文件面板 二选一（切换式，不再左右分栏）。"""
 
     status = Signal(str)
     failed = Signal(str)
@@ -34,15 +34,48 @@ class SessionTab(QWidget):
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        self.splitter = QSplitter(Qt.Horizontal)
+        lay.setSpacing(0)
+
+        sw = QHBoxLayout()
+        sw.setContentsMargins(8, 6, 8, 6)
+        sw.setSpacing(0)
+        self.btn_term = QPushButton("终端")
+        self.btn_files = QPushButton("文件")
+        seg_qss = ("QPushButton{border:1px solid #d0d5dd;background:#fff;color:#333;"
+                   "padding:3px 16px;font-size:12px}"
+                   "QPushButton:checked{background:#1677ff;color:#fff;border-color:#1677ff}"
+                   "QPushButton:disabled{color:#bbb;border-color:#e5e7eb}")
+        for b in (self.btn_term, self.btn_files):
+            b.setCheckable(True)
+            b.setAutoExclusive(True)
+            b.setFixedHeight(28)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setStyleSheet(seg_qss)
+            b.setFocusPolicy(Qt.NoFocus)
+            sw.addWidget(b)
+        self.btn_term.setChecked(True)
+        self.btn_term.clicked.connect(lambda: self.show_files(False))
+        self.btn_files.clicked.connect(lambda: self.show_files(True))
+        sw.addSpacing(10)
+        self.switch_hint = QLabel("Ctrl+` 切换终端 / 文件")
+        self.switch_hint.setStyleSheet("color:#9aa0a6;font-size:11px")
+        sw.addWidget(self.switch_hint)
+        sw.addStretch(1)
+        lay.addLayout(sw)
+
+        self.stack = QStackedWidget()
         self.term = TerminalView(self, cfg.font_family, profile.font_size or cfg.font_size)
-        self.splitter.addWidget(self.term)
-        self.splitter.setStretchFactor(0, 3)
-        self.splitter.setChildrenCollapsible(False)
-        self.term.setMinimumWidth(320)
+        self.stack.addWidget(self.term)
+        lay.addWidget(self.stack, 1)
         self.browser: Optional[FileBrowser] = None
-        lay.addWidget(self.splitter, 1)
         self.term.connected_changed.connect(self._on_conn_changed)
+
+        from PySide6.QtGui import QShortcut, QKeySequence
+        sc = QShortcut(QKeySequence("Ctrl+`"), self)
+        sc.activated.connect(self.toggle_view)
+
+    def toggle_view(self) -> None:
+        self.show_files(self.stack.currentWidget() is self.term)
 
     # ---- 连接 ----
     def ask_password(self) -> bool:
@@ -69,8 +102,7 @@ class SessionTab(QWidget):
             self.term.attach_channel(chan)
             self.term._refresh_metrics()
             self.term._apply_size_to_chan()
-            if self.cfg.show_file_panel:
-                self.show_files(True)
+            self.show_files(False)          # 连上先看终端，文件按一下「文件」再切
             self.status.emit("已连接 %s（%s）" % (self.profile.display(),
                                                 getattr(self.session, "host_key_status", "")))
             return True
@@ -84,21 +116,19 @@ class SessionTab(QWidget):
         if on and self.browser is None and self.session is not None:
             try:
                 self.browser = FileBrowser(self.session, self)
-                self.splitter.addWidget(self.browser)
-                self.splitter.setStretchFactor(1, 2)
-                self.browser.setMinimumWidth(420)
-                # 等布局算完再设比例，否则此刻 width() 还是 0，终端会被压成一条
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(0, self._apply_split)
+                self.stack.addWidget(self.browser)
             except Exception as e:                 # noqa: BLE001
                 self.failed.emit("打开文件面板失败：%s" % e)
+                self.btn_term.setChecked(True)
                 return
-        if self.browser is not None:
-            self.browser.setVisible(on)
-
-    def _apply_split(self) -> None:
-        w = max(self.width(), 1000)
-        self.splitter.setSizes([int(w * 0.58), int(w * 0.42)])
+        if on and self.browser is None:            # 还没连上，没有文件可看
+            self.btn_term.setChecked(True)
+            return
+        self.stack.setCurrentWidget(self.browser if on else self.term)
+        self.btn_files.setChecked(on)
+        self.btn_term.setChecked(not on)
+        if not on:
+            self.term.setFocus()
 
     def set_font_size(self, size: int) -> None:
         self.term.set_font_size(size)
@@ -194,7 +224,12 @@ class MainWindow(QMainWindow):
 
         # ---- 左侧会话列表 ----
         dock = QDockWidget("会话", self)
-        dock.setFeatures(QDockWidget.DockWidgetMovable)   # 不允许浮动，标题栏就不出那个小图标
+        # 浮动（标题栏小图标 / 双击标题栏）+ 关闭按钮 + 拖到任意边
+        dock.setFeatures(QDockWidget.DockWidgetMovable
+                         | QDockWidget.DockWidgetFloatable
+                         | QDockWidget.DockWidgetClosable)
+        dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        dock.setMinimumWidth(260)
         box = QWidget()
         bl = QVBoxLayout(box)
         bl.setContentsMargins(4, 4, 4, 4)
@@ -222,6 +257,7 @@ class MainWindow(QMainWindow):
         bl.addLayout(row)
         dock.setWidget(box)
         self.addDockWidget(Qt.LeftDockWidgetArea, dock)
+        self.dock = dock
 
         # ---- 标签（无会话时显示引导页）----
         self.tabs = QTabWidget()
@@ -248,13 +284,14 @@ class MainWindow(QMainWindow):
         act_new.triggered.connect(self.new_session)
         tb.addAction(act_new)
 
-        tb.addSeparator()
-        self.act_files = QAction("文件面板", self, checkable=True)
-        self.act_files.setToolTip("显示 / 隐藏右侧 SFTP 文件面板")
-        self.act_files.setChecked(self.cfg.show_file_panel)
-        self.act_files.triggered.connect(self.toggle_files)
-        tb.addAction(self.act_files)
+        self.act_dock = QAction("会话", self, checkable=True)
+        self.act_dock.setToolTip("显示 / 隐藏左侧会话窗（也可把它拖出去浮动）")
+        self.act_dock.setChecked(True)
+        self.act_dock.toggled.connect(lambda on: self.dock.setVisible(on))
+        self.dock.visibilityChanged.connect(self.act_dock.setChecked)
+        tb.addAction(self.act_dock)
 
+        tb.addSeparator()
         self.act_reconnect = QAction("重连", self)
         act_reconnect = self.act_reconnect
         act_reconnect.setToolTip("断开当前标签并重新连接")

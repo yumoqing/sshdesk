@@ -114,9 +114,10 @@ class FileTable(QWidget):
 
         bar = QHBoxLayout()
         bar.setSpacing(4)
-        tag = QLabel(title.split(" ")[0] if title.startswith(("本地", "远端")) else title)
+        base = title.split(" ")[0] if title.startswith(("本地", "远端")) else title
+        tag = QLabel(base + "文件" if base in ("本地", "远端") else base)
         tag.setStyleSheet("color:#444; font-weight:600")
-        tag.setFixedWidth(34)
+        tag.setFixedWidth(60)
         tag.setToolTip(title)
         bar.addWidget(tag)
         self.path_edit = QLineEdit(self.cwd)
@@ -128,7 +129,7 @@ class FileTable(QWidget):
 
         ops = QHBoxLayout()
         ops.setSpacing(4)
-        ops.setContentsMargins(32, 0, 0, 0)
+        ops.setContentsMargins(60, 0, 0, 0)
         for text, tip, fn, width in (
                 ("上级", "上一级目录", lambda: self.chdir(self.fs.parent(self.cwd)), 44),
                 ("刷新", "重新读取目录", self.reload, 44),
@@ -295,6 +296,8 @@ class FileBrowser(QWidget):
         ops.addSpacing(8)
         ops.addWidget(self.hint, 1)
         bar.setFixedHeight(40)
+        bar.setStyleSheet("background:#f5f7fa;border-top:1px solid #e5e7eb;"
+                          "border-bottom:1px solid #e5e7eb")
 
         # 面板本身不宽，左右并排会把"名称"列压没；上下叠放，每栏都占满宽度
         sp = QSplitter(Qt.Vertical)

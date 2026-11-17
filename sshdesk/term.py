@@ -7,7 +7,8 @@ from typing import Optional
 
 import pyte
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QKeyEvent, QPainter, QPaintEvent, QResizeEvent
+from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QKeyEvent, QPainter, QPaintEvent,
+                           QResizeEvent, QGuiApplication)
 from PySide6.QtWidgets import QApplication, QWidget
 
 DEFAULT_FG = QColor("#e6e6e6")
@@ -49,11 +50,17 @@ class TerminalView(QWidget):
         self._stop = threading.Event()
         self._cell_w = 8.0
         self._cell_h = 16.0
+        self._pad_x = 10.0             # 文字不要贴着边框
+        self._pad_y = 8.0
         self._font = QFont(font_family, font_size)
         self._font.setStyleHint(QFont.Monospace)
         self._refresh_metrics()
         self._blink = True
         self._hist_bottom = 0          # 到底部时的 history.position
+        self._sel_a = None             # 选择锚点 (row, col)
+        self._sel_b = None             # 选择终点 (row, col)
+        self._selecting = False
+        self.setMouseTracking(True)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._on_blink)
         self._timer.start(600)
@@ -77,8 +84,10 @@ class TerminalView(QWidget):
         fm = QFontMetricsF(self._font)
         self._cell_w = max(4.0, fm.horizontalAdvance("M"))
         self._cell_h = max(6.0, fm.height())
-        cols = max(20, int(self.width() / self._cell_w)) if self.width() else 100
-        rows = max(5, int(self.height() / self._cell_h)) if self.height() else 30
+        aw = max(0.0, self.width() - 2 * self._pad_x)
+        ah = max(0.0, self.height() - 2 * self._pad_y)
+        cols = max(20, int(aw / self._cell_w)) if self.width() else 100
+        rows = max(5, int(ah / self._cell_h)) if self.height() else 30
         self._resize_screen(rows, cols)
 
     def _resize_screen(self, rows: int, cols: int) -> None:
@@ -165,9 +174,20 @@ class TerminalView(QWidget):
 
     def keyPressEvent(self, e: QKeyEvent) -> None:       # noqa: N802
         mods, key = e.modifiers(), e.key()
+        if key == Qt.Key_C and (mods & Qt.ControlModifier):
+            if self.copy_selection():                     # 有选中 → 复制
+                return
+            if mods & Qt.ShiftModifier:                   # 没选中时 Ctrl+Shift+C 复制整屏
+                QGuiApplication.clipboard().setText(self.screen_text())
+                return
+        if key == Qt.Key_Insert and (mods & Qt.ControlModifier):
+            self.copy_selection()
+            return
+        if key == Qt.Key_Insert and (mods & Qt.ShiftModifier):
+            self.paste()
+            return
         if mods & Qt.ControlModifier and mods & Qt.ShiftModifier:
-            if key == Qt.Key_C:                          # Ctrl+Shift+C 复制
-                QApplication.clipboard().setText(self.selected_text())
+            if key == Qt.Key_C:
                 return
             if key == Qt.Key_V:                          # Ctrl+Shift+V 粘贴
                 self.send(QApplication.clipboard().text().encode("utf-8"))
@@ -191,9 +211,125 @@ class TerminalView(QWidget):
                     return
             self.send(text.encode("utf-8"))
 
+    # ---------------- 选择 / 复制 ----------------
+    def _cell_at(self, pos) -> tuple:
+        col = int((pos.x() - self._pad_x) // self._cell_w)
+        row = int((pos.y() - self._pad_y) // self._cell_h)
+        return (max(0, min(self._screen.lines - 1, row)),
+                max(0, min(self._screen.columns - 1, col)))
+
+    def _ordered(self):
+        if self._sel_a is None or self._sel_b is None:
+            return None
+        a, b = self._sel_a, self._sel_b
+        return (a, b) if (a[0], a[1]) <= (b[0], b[1]) else (b, a)
+
+    def has_selection(self) -> bool:
+        """单点点击不算选择。"""
+        rng = self._ordered()
+        return bool(rng and rng[0] != rng[1])
+
+    def clear_selection(self) -> None:
+        self._sel_a = self._sel_b = None
+        self.update()
+
+    def select_all(self) -> None:
+        self._sel_a = (0, 0)
+        self._sel_b = (self._screen.lines - 1, self._screen.columns - 1)
+        self.update()
+
+    def selection_text(self) -> str:
+        rng = self._ordered()
+        if not rng or not self.has_selection():
+            return ""
+        (r1, c1), (r2, c2) = rng
+        buf = self._screen.buffer
+        out = []
+        for r in range(r1, r2 + 1):
+            line = buf.get(r, {})
+            lo = c1 if r == r1 else 0
+            hi = c2 if r == r2 else self._screen.columns - 1
+            out.append("".join((line.get(x).data if line.get(x) else " ")
+                               for x in range(lo, hi + 1)).rstrip())
+        while out and not out[-1]:
+            out.pop()
+        return "\n".join(out)
+
+    def copy_selection(self) -> bool:
+        txt = self.selection_text()
+        if not txt:
+            return False
+        QGuiApplication.clipboard().setText(txt)
+        return True
+
+    def paste(self) -> None:
+        self.send(QGuiApplication.clipboard().text().encode("utf-8"))
+
+    def mousePressEvent(self, e) -> None:                  # noqa: N802
+        if e.button() == Qt.LeftButton:
+            self._sel_a = self._cell_at(e.position())
+            self._sel_b = self._sel_a
+            self._selecting = True
+            self.update()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e) -> None:                   # noqa: N802
+        if self._selecting:
+            self._sel_b = self._cell_at(e.position())
+            self.update()
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e) -> None:                # noqa: N802
+        if e.button() == Qt.LeftButton and self._selecting:
+            self._selecting = False
+            if not self.has_selection():
+                self.clear_selection()
+        super().mouseReleaseEvent(e)
+
+    def mouseDoubleClickEvent(self, e) -> None:            # noqa: N802
+        """双击选中光标下的单词；点在空白处则选整行文字。"""
+        if e.button() == Qt.LeftButton:
+            row, col = self._cell_at(e.position())
+            line = self._screen.buffer.get(row, {})
+            text = "".join((line.get(x).data if line.get(x) else " ")
+                           for x in range(self._screen.columns))
+            lo = len(text) - len(text.lstrip())
+            hi = len(text.rstrip()) - 1
+            if hi < lo:                                    # 空行
+                self._sel_a, self._sel_b = (row, 0), (row, 0)
+            elif lo <= col <= hi and text[col] != " ":
+                s = col
+                while s > lo and text[s - 1] != " ":
+                    s -= 1
+                t2 = col
+                while t2 < hi and text[t2 + 1] != " ":
+                    t2 += 1
+                self._sel_a, self._sel_b = (row, s), (row, t2)
+            else:
+                self._sel_a, self._sel_b = (row, lo), (row, hi)
+            self.update()
+        super().mouseDoubleClickEvent(e)
+
+    def contextMenuEvent(self, e) -> None:                 # noqa: N802
+        from PySide6.QtWidgets import QMenu
+        m = QMenu(self)
+        a_copy = m.addAction("复制")
+        a_copy.setEnabled(self.has_selection())
+        a_copy.triggered.connect(self.copy_selection)
+        m.addAction("粘贴", self.paste)
+        m.addSeparator()
+        m.addAction("全选", self.select_all)
+        m.addAction("回到底部", lambda: self.scroll_history(-999))
+        m.exec(e.globalPos())
+
     # ---------------- 绘制 ----------------
-    def selected_text(self) -> str:
+    def screen_text(self) -> str:
+        """整屏文字（不含未显示的历史）。"""
         return "\n".join(line.rstrip() for line in self._screen.display)
+
+    def selected_text(self) -> str:
+        """有选区返回选区，否则返回整屏（兼容旧调用）。"""
+        return self.selection_text() or self.screen_text()
 
     def paintEvent(self, e: QPaintEvent) -> None:        # noqa: N802
         p = QPainter(self)
@@ -202,7 +338,8 @@ class TerminalView(QWidget):
         lines = self._screen.buffer
         cols, rows = self._screen.columns, self._screen.lines
         default_fg = default_bg = None
-        for y in range(min(rows, int(self.height() / self._cell_h) + 1)):
+        px, py = self._pad_x, self._pad_y
+        for y in range(min(rows, int((self.height() - 2 * py) / self._cell_h) + 1)):
             line = lines.get(y, {})
             x = 0
             while x < cols:
@@ -229,7 +366,7 @@ class TerminalView(QWidget):
                         break
                     run += nxt.data
                     x += 1
-                rect = QRectF(start * self._cell_w, y * self._cell_h,
+                rect = QRectF(px + start * self._cell_w, py + y * self._cell_h,
                               len(run) * self._cell_w, self._cell_h)
                 if bg != DEFAULT_BG:
                     p.fillRect(rect, bg)
@@ -237,7 +374,21 @@ class TerminalView(QWidget):
                 f = QFont(self._font)
                 f.setBold(bool(cell.bold))
                 p.setFont(f)
-                p.drawText(QPointF(start * self._cell_w, y * self._cell_h + self._cell_h * 0.78), run)
+                p.drawText(QPointF(px + start * self._cell_w,
+                                   py + y * self._cell_h + self._cell_h * 0.78), run)
+        # 选区高亮
+        rng = self._ordered()
+        if rng and self.has_selection():
+            (r1, c1), (r2, c2) = rng
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(38, 79, 120, 190))
+            for r in range(r1, r2 + 1):
+                lo = c1 if r == r1 else 0
+                hi = c2 if r == r2 else cols - 1
+                p.drawRect(QRectF(px + lo * self._cell_w, py + r * self._cell_h,
+                                  (hi - lo + 1) * self._cell_w, self._cell_h))
+            p.setBrush(Qt.NoBrush)
+
         # 回滚提示（pyte 的 history.position 是从历史顶部数的行号，到底部时最大）
         try:
             pos = self._screen.history.position
@@ -255,5 +406,6 @@ class TerminalView(QWidget):
         # 光标
         if self._blink:
             cx, cy = self._screen.cursor.x, self._screen.cursor.y
-            p.fillRect(QRectF(cx * self._cell_w, cy * self._cell_h, self._cell_w, self._cell_h), CURSOR_BG)
+            p.fillRect(QRectF(px + cx * self._cell_w, py + cy * self._cell_h,
+                              self._cell_w, self._cell_h), CURSOR_BG)
         p.end()
