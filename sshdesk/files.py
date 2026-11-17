@@ -9,7 +9,7 @@ import time
 from typing import Callable, List, Optional, Tuple
 
 from PySide6.QtCore import QThread, Qt, Signal
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFileDialog, QFileIconProvider, QHBoxLayout, QLabel,
                                QLineEdit, QMessageBox, QProgressDialog, QPushButton, QSplitter,
                                QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
@@ -112,33 +112,49 @@ class FileTable(QWidget):
         lay.setSpacing(4)
 
         bar = QHBoxLayout()
-        bar.addWidget(QLabel(title))
+        bar.setSpacing(4)
+        tag = QLabel(title.split(" ")[0] if title.startswith(("本地", "远端")) else title)
+        tag.setStyleSheet("color:#444; font-weight:600")
+        tag.setFixedWidth(34)
+        tag.setToolTip(title)
+        bar.addWidget(tag)
         self.path_edit = QLineEdit(self.cwd)
+        self.path_edit.setMinimumWidth(100)
+        self.path_edit.setToolTip("%s\n%s" % (title, self.cwd))
         self.path_edit.returnPressed.connect(lambda: self.chdir(self.path_edit.text()))
         bar.addWidget(self.path_edit, 1)
-        up = QPushButton("↑")
-        up.setFixedWidth(30)
-        up.clicked.connect(lambda: self.chdir(self.fs.parent(self.cwd)))
-        bar.addWidget(up)
-        refresh = QPushButton("刷新")
-        refresh.clicked.connect(self.reload)
-        bar.addWidget(refresh)
-        mk = QPushButton("新建目录")
-        mk.clicked.connect(self._mkdir)
-        bar.addWidget(mk)
-        rm = QPushButton("删除")
-        rm.clicked.connect(self._remove)
-        bar.addWidget(rm)
         lay.addLayout(bar)
+
+        ops = QHBoxLayout()
+        ops.setSpacing(4)
+        ops.setContentsMargins(32, 0, 0, 0)
+        for text, tip, fn, width in (
+                ("↑", "上级目录", lambda: self.chdir(self.fs.parent(self.cwd)), 28),
+                ("刷新", "重新读取目录", self.reload, 44),
+                ("新建", "在当前目录新建文件夹", self._mkdir, 44),
+                ("删除", "删除选中项", self._remove, 44)):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.setFixedWidth(width)
+            b.clicked.connect(fn)
+            ops.addWidget(b)
+        ops.addStretch(1)
+        lay.addLayout(ops)
 
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["名称", "大小", "修改时间"])
+        self.table.setShowGrid(False)
+        self.table.verticalHeader().setDefaultSectionSize(24)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setColumnWidth(0, 260)
+
+        from PySide6.QtWidgets import QHeaderView
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.table.doubleClicked.connect(self._on_double)
         lay.addWidget(self.table, 1)
 
@@ -169,8 +185,12 @@ class FileTable(QWidget):
             self.path_edit.setText("%s   ⚠ %s" % (self.cwd, str(e)[:60]))
             return
         self.table.setRowCount(len(rows))
+        ic = QFileIconProvider()
+        dir_icon = ic.icon(QFileIconProvider.Folder)
+        file_icon = ic.icon(QFileIconProvider.File)
         for i, (name, size, mtime, is_dir) in enumerate(rows):
-            item = QTableWidgetItem(("[DIR] " if is_dir else "") + name)
+            item = QTableWidgetItem(name)
+            item.setIcon(dir_icon if is_dir else file_icon)
             item.setData(Qt.UserRole, (name, is_dir))
             self.table.setItem(i, 0, item)
             self.table.setItem(i, 1, QTableWidgetItem("" if is_dir else human_size(size)))
@@ -256,12 +276,14 @@ class FileBrowser(QWidget):
         ops.addWidget(self.hint)
         lay.addLayout(ops)
 
-        sp = QSplitter(Qt.Horizontal)
+        # 面板本身不宽，左右并排会把"名称"列压没；上下叠放，每栏都占满宽度
+        sp = QSplitter(Qt.Vertical)
         self.local = FileTable(LocalFS(), "本地")
         self.remote = FileTable(RemoteFS(session), "远端 %s" % session.profile.host)
         sp.addWidget(self.local)
         sp.addWidget(self.remote)
-        sp.setSizes([400, 400])
+        sp.setChildrenCollapsible(False)
+        sp.setSizes([300, 300])
         lay.addWidget(sp, 1)
         self.remote.activated.connect(lambda p: self.hint.setText("远端文件：%s" % p))
 

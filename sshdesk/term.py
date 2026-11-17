@@ -53,6 +53,7 @@ class TerminalView(QWidget):
         self._font.setStyleHint(QFont.Monospace)
         self._refresh_metrics()
         self._blink = True
+        self._hist_bottom = 0          # 到底部时的 history.position
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._on_blink)
         self._timer.start(600)
@@ -237,13 +238,18 @@ class TerminalView(QWidget):
                 f.setBold(bool(cell.bold))
                 p.setFont(f)
                 p.drawText(QPointF(start * self._cell_w, y * self._cell_h + self._cell_h * 0.78), run)
-        # 回滚提示
+        # 回滚提示（pyte 的 history.position 是从历史顶部数的行号，到底部时最大）
         try:
-            if self._screen.history.position != 0:
+            pos = self._screen.history.position
+            self._hist_bottom = max(self._hist_bottom, pos)
+            back = self._hist_bottom - pos
+            if back > 0:
+                msg = "↑ 已回看 %d 行 · Shift+PgDn 回到底部" % back
+                w = min(self.width() - 8, 8 * len(msg))
+                box = QRectF(self.width() - w - 8, 6, w, self._cell_h + 4)
+                p.fillRect(box, QColor(0, 0, 0, 180))
                 p.setPen(QColor("#f9f1a5"))
-                p.drawText(QRectF(0, self.height() - self._cell_h, self.width(), self._cell_h),
-                           Qt.AlignRight | Qt.AlignVCenter,
-                           "历史 -%d 屏   ⤓ Shift+PgDn 回到底部 " % self._screen.history.position)
+                p.drawText(box, Qt.AlignCenter, msg)
         except Exception:                        # noqa: BLE001
             pass
         # 光标
