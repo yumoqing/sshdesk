@@ -8,12 +8,26 @@ from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional
 
 
+def default_mono_font() -> str:
+    """各平台默认等宽字体（Consolas 只有 Windows 有）。"""
+    import sys
+    if sys.platform == "darwin":
+        return "Menlo"
+    if sys.platform.startswith("win"):
+        return "Consolas"
+    return "DejaVu Sans Mono"
+
+
 def config_dir() -> str:
     override = os.environ.get("SSHDESK_CONFIG_DIR")
     if override:
         os.makedirs(override, exist_ok=True)
         return override
-    base = os.environ.get("APPDATA") or os.path.expanduser("~/.config")
+    import sys
+    if sys.platform == "darwin":                      # ~/Library/Application Support/sshdesk
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.environ.get("APPDATA") or os.path.expanduser("~/.config")
     d = os.path.join(base, "sshdesk")
     os.makedirs(d, exist_ok=True)
     return d
@@ -47,7 +61,7 @@ class HostProfile:
     jump_password: str = ""
     # 终端
     font_size: int = 11
-    font_family: str = "Consolas"
+    font_family: str = ""                  # 空 = 按平台取（Windows Consolas / macOS Menlo / Linux DejaVu）
     # 主机密钥策略：auto=首连信任并记录(TOFU)；strict=必须与 known_hosts 一致
     hostkey: str = "auto"
     auto_add_key: bool = True
@@ -66,14 +80,17 @@ class HostProfile:
     @classmethod
     def from_dict(cls, d: dict) -> "HostProfile":
         allowed = {f for f in cls.__dataclass_fields__}
-        return cls(**{k: v for k, v in d.items() if k in allowed})
+        h = cls(**{k: v for k, v in d.items() if k in allowed})
+        if not h.font_family or (h.font_family == "Consolas" and default_mono_font() != "Consolas"):
+            h.font_family = default_mono_font()
+        return h
 
 
 @dataclass
 class AppConfig:
     hosts: List[HostProfile] = field(default_factory=list)
     font_size: int = 11
-    font_family: str = "Consolas"
+    font_family: str = ""                  # 空 = 平台默认
     show_file_panel: bool = True
 
     # ---- 读写 ----
@@ -89,7 +106,7 @@ class AppConfig:
             return cls()
         return cls(hosts=[HostProfile.from_dict(h) for h in raw.get("hosts", [])],
                    font_size=raw.get("font_size", 11),
-                   font_family=raw.get("font_family", "Consolas"),
+                   font_family=raw.get("font_family") or default_mono_font(),
                    show_file_panel=raw.get("show_file_panel", True))
 
     def save(self, path: Optional[str] = None) -> str:

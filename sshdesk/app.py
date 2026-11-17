@@ -26,7 +26,7 @@ from bricks_qt.app import BricksWindow
 from bricks_qt.remotefiles import RemoteFiles
 from bricks_qt.terminal import Terminal
 
-from .config import AppConfig, HostProfile
+from .config import AppConfig, HostProfile, default_mono_font
 from .dialogs import HostDialog, SessionManager
 from .session import SSHError, SSHSession
 
@@ -68,6 +68,11 @@ class SessionPage:
         self.pages = sub.refs["pages"]
         self.session: Optional[SSHSession] = None
         self.term.set_font_size(int(profile.font_size or cfg.font_size or DEFAULT_FONT))
+        fam = profile.font_family or cfg.font_family or default_mono_font()
+        try:
+            self.term.set_font_family(fam)
+        except Exception:                   # noqa: BLE001
+            pass
 
     # ---- 兼容旧接口（测试/脚本用）----
     @property

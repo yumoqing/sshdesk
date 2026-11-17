@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QVBoxLayout,
                                QWidget)
 
-from .config import AppConfig, HostProfile
+from .config import AppConfig, HostProfile, default_mono_font
 from .session import SSHError, SSHSession
 
 
@@ -30,6 +30,8 @@ class HostDialog(QDialog):
     """新增 / 修改一个会话。"""
 
     def __init__(self, profile: Optional[HostProfile] = None, parent=None):
+        if profile is None:
+            profile = HostProfile(font_family=default_mono_font())
         super().__init__(parent)
         self.setWindowTitle("会话设置" if profile else "新建会话")
         self.setMinimumWidth(520)

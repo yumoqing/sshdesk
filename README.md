@@ -107,3 +107,21 @@ python tests/test_client.py
 - 主机密钥：`auto` 模式是 TOFU（首次连接时**先连上再记录**，存在极短的信任窗口），`strict` 模式才做拒绝；
   没有提供逐条编辑 known_hosts 的界面，需要的话直接改 `%APPDATA%\sshdesk\known_hosts`。
 - 滚动历史基于 pyte 的 HistoryScreen（5000 行），不支持搜索/选中复制历史行。
+
+## macOS
+
+界面和逻辑与 Windows/Linux 同一份（bricks .ui + bricks_qt），只需装依赖即可跑：
+
+```bash
+brew install python@3.12
+python3 -m venv ~/.venvs/sshdesk && . ~/.venvs/sshdesk/bin/activate
+pip install -e .                      # PySide6-Essentials / appPublic.sshx / pyte 都会装上
+python -m sshdesk                     # 直接起窗口
+```
+
+- 配置目录走 macOS 规范：`~/Library/Application Support/sshdesk/`（hosts.json / known_hosts）
+- 终端默认等宽字体：macOS `Menlo`（Windows Consolas / Linux DejaVu Sans Mono），可在会话里改
+- 打包成 .app：`python tools/build_exe.py`（PyInstaller 在 macOS 上 `--windowed` 直接产出 `dist/sshdesk.app`）
+  首次打开如被 Gatekeeper 拦，右键 → 打开，或 `xattr -dr com.apple.quarantine dist/sshdesk.app`
+- 用 `~/.ssh/id_rsa` 免密连 kymoz 这类主机没问题（asyncssh 直接用系统密钥）
+- CI 在 `macos-latest` 上跑 `.ui` 构建校验 + 原生控件冒烟，作为"macOS 原生可用"的持续证据
