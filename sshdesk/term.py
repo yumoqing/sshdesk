@@ -19,6 +19,53 @@ CURSOR_BG = QColor("#00c896")
 ANSI16 = ["#0c0c0c", "#c50f1f", "#13a10e", "#c19c00", "#0037da", "#881798", "#3a96dd", "#cccccc",
           "#767676", "#e74856", "#16c60c", "#f9f1a5", "#3b78ff", "#b4009e", "#61d6d6", "#f2f2f2"]
 
+# pyte 的颜色名 → xterm 配色（暗/亮两套）
+NAMED = {"black": "#0c0c0c", "red": "#c50f1f", "green": "#13a10e", "brown": "#c19c00",
+         "blue": "#0037da", "magenta": "#881798", "cyan": "#3a96dd", "white": "#cccccc"}
+NAMED_BRIGHT = {"black": "#767676", "red": "#e74856", "green": "#16c60c", "brown": "#f9f1a5",
+                "blue": "#3b78ff", "magenta": "#b4009e", "cyan": "#61d6d6", "white": "#f2f2f2"}
+HEXCHARS = set("0123456789abcdef")
+
+
+def xterm256(n: int) -> str:
+    """xterm 256 色下标 → #rrggbb。"""
+    n = int(n) & 0xFF
+    if n < 16:
+        return (ANSI16 + ["#0c0c0c", "#e74856", "#16c60c", "#f9f1a5", "#3b78ff",
+                          "#b4009e", "#61d6d6", "#f2f2f2"])[n]
+    if n < 232:
+        n -= 16
+        lv = [0, 95, 135, 175, 215, 255]
+        return "#%02x%02x%02x" % (lv[n // 36], lv[(n // 6) % 6], lv[n % 6])
+    g = 8 + (n - 232) * 10
+    return "#%02x%02x%02x" % (g, g, g)
+
+
+def color_of(val, default: QColor, bold: bool = False) -> QColor:
+    """把 pyte 的 cell.fg / cell.bg 翻成 QColor；任何认不出的值都退回默认色。"""
+    try:
+        if val is None:
+            return default
+        if isinstance(val, bool):
+            return default
+        if isinstance(val, int):
+            return QColor(xterm256(val))
+        if isinstance(val, (tuple, list)) and len(val) == 3:
+            return QColor(int(val[0]) & 255, int(val[1]) & 255, int(val[2]) & 255)
+        if not isinstance(val, str):
+            return default
+        v = val.strip().lower()
+        if not v or v.startswith("default"):
+            return default
+        if v in NAMED:
+            return QColor(NAMED_BRIGHT.get(v) if bold else NAMED[v])
+        if len(v) == 6 and set(v) <= HEXCHARS:
+            return QColor("#" + v)
+        return default
+    except Exception:                       # noqa: BLE001
+        return default
+
+
 KEYS = {
     Qt.Key_Return: b"\r", Qt.Key_Enter: b"\r", Qt.Key_Backspace: b"\x7f", Qt.Key_Tab: b"\t",
     Qt.Key_Escape: b"\x1b", Qt.Key_Up: b"\x1b[A", Qt.Key_Down: b"\x1b[B",
@@ -353,9 +400,12 @@ class TerminalView(QWidget):
         p.setFont(self._font)
         lines = self._screen.buffer
         cols, rows = self._screen.columns, self._screen.lines
-        default_fg = default_bg = None
         px, py = self._pad_x, self._pad_y
-        for y in range(min(rows, int((self.height() - 2 * py) / self._cell_h) + 1)):
+        font_plain = QFont(self._font)
+        font_bold = QFont(self._font)
+        font_bold.setBold(True)
+        visible = min(rows, int((self.height() - 2 * py) / self._cell_h) + 1)
+        for y in range(max(0, visible)):
             line = lines.get(y, {})
             x = 0
             while x < cols:
@@ -363,11 +413,15 @@ class TerminalView(QWidget):
                 if cell is None:
                     x += 1
                     continue
-                fg = QColor(ANSI16[cell.fg]) if isinstance(cell.fg, str) and cell.fg.startswith("default") is False else DEFAULT_FG
-                bg = DEFAULT_BG
-                if cell.reverse:
-                    fg, bg = DEFAULT_BG, fg
-                # 合并同色连续字符，减少 drawText 调用
+                # 颜色一律走 color_of：pyte 给的是 'green' / 'ff0000' / int，
+                # 之前直接拿字符串下标 ANSI16 会抛异常，整帧绘制中断（表现为只画到第一个彩色字符、光标也没了）
+                try:
+                    fg = color_of(cell.fg, DEFAULT_FG, bool(cell.bold))
+                    bg = color_of(cell.bg, DEFAULT_BG)
+                    if cell.reverse:
+                        fg, bg = bg if bg != DEFAULT_BG else DEFAULT_FG, fg
+                except Exception:                        # noqa: BLE001
+                    fg, bg = DEFAULT_FG, DEFAULT_BG
                 run = cell.data
                 start = x
                 x += 1
@@ -375,10 +429,14 @@ class TerminalView(QWidget):
                     nxt = line.get(x)
                     if nxt is None or nxt.data == " ":
                         break
-                    nfg = QColor(ANSI16[nxt.fg]) if isinstance(nxt.fg, str) and not nxt.fg.startswith("default") else DEFAULT_FG
-                    if nxt.reverse:
-                        nfg = DEFAULT_BG
-                    if nfg != fg or nxt.bold != cell.bold:
+                    try:
+                        nfg = color_of(nxt.fg, DEFAULT_FG, bool(nxt.bold))
+                        nbg = color_of(nxt.bg, DEFAULT_BG)
+                        if nxt.reverse:
+                            nfg, nbg = nbg if nbg != DEFAULT_BG else DEFAULT_FG, nfg
+                    except Exception:                    # noqa: BLE001
+                        break
+                    if nfg != fg or nbg != bg or nxt.bold != cell.bold:
                         break
                     run += nxt.data
                     x += 1
@@ -387,11 +445,11 @@ class TerminalView(QWidget):
                 if bg != DEFAULT_BG:
                     p.fillRect(rect, bg)
                 p.setPen(fg)
-                f = QFont(self._font)
-                f.setBold(bool(cell.bold))
-                p.setFont(f)
+                p.setFont(font_bold if cell.bold else font_plain)
                 p.drawText(QPointF(px + start * self._cell_w,
                                    py + y * self._cell_h + self._cell_h * 0.78), run)
+        p.setFont(self._font)
+
         # 选区高亮
         rng = self._ordered()
         if rng and self.has_selection():
@@ -420,8 +478,11 @@ class TerminalView(QWidget):
         except Exception:                        # noqa: BLE001
             pass
         # 光标
-        if self._blink:
+        if self._blink and not getattr(self._screen.cursor, "hidden", False):
             cx, cy = self._screen.cursor.x, self._screen.cursor.y
+            if not (0 <= cx < cols and 0 <= cy < rows):
+                p.end()
+                return
             p.fillRect(QRectF(px + cx * self._cell_w, py + cy * self._cell_h,
                               self._cell_w, self._cell_h), CURSOR_BG)
         p.end()

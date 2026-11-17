@@ -276,6 +276,46 @@ def main() -> int:
         for i in reversed(range(win.tabs.count())):
             win.close_tab(i)
 
+    # ---------- 终端彩色输出必须真的画出来（回归：pyte 的颜色是字符串/十六进制/int，
+    # 早期直接拿字符串下标 ANSI16 会抛异常 → paintEvent 中断，只剩第一个彩色字符之前的内容）----------
+    def t_color():
+        from PySide6.QtCore import QSize, Qt
+        from PySide6.QtWidgets import QApplication
+        from sshdesk.term import TerminalView
+        app = QApplication.instance() or QApplication(sys.argv[:1])
+        tv = TerminalView(font_family="Consolas", font_size=12)
+        tv.resize(QSize(800, 300))
+        tv.setAttribute(Qt.WA_DontShowOnScreen, True)
+        tv.show()
+        tv._refresh_metrics()
+        tv._stream.feed(b"(py3) \x1b]0;t\x07\x1b[01;32mymq@home\x1b[00m:"
+                        b"\x1b[01;34m~\x1b[00m$ \x1b[38;5;208mORANGE\x1b[0m "
+                        b"\x1b[38;2;255;0;0mRED\x1b[0m\r\n")
+        app.processEvents()
+        txt = tv.screen_text()
+        assert "ymq@home:~$" in txt, "彩色提示符没进屏幕缓冲区：%r" % txt[:80]
+        assert "ORANGE" in txt and "RED" in txt, "256 色/真彩文本丢了：%r" % txt[:80]
+        img = tv.grab().toImage()          # 触发 paintEvent：颜色解析炸就会在这里抛
+        assert not img.isNull(), "终端截图失败"
+        # 抗锯齿会把纯色打散，按色相判定而不是精确 hex
+        green = orange = red = 0
+        for y in range(0, min(img.height(), 40)):
+            for x in range(0, img.width()):
+                c = img.pixelColor(x, y)
+                r, g, b = c.red(), c.green(), c.blue()
+                if g > 140 and r < 90 and b < 90:
+                    green += 1
+                if r > 220 and 100 < g < 190 and b < 60:
+                    orange += 1
+                if r > 190 and g < 70 and b < 70:
+                    red += 1
+        assert green, "绿色提示符没画出来"
+        assert orange, "256 色调色板没画出来"
+        assert red, "真彩没画出来"
+        tv.close()
+
+    check("终端彩色输出渲染", t_color)
+
     check("多标签 + 字体缩放 + 文件面板", t_gui)
 
     # ---------- 收尾 ----------
