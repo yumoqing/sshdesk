@@ -48,3 +48,6 @@ jobs:
 
       - name: 原生控件冒烟（Terminal / RemoteFiles）
         run: python tests/native_smoke.py
+
+      - name: 断点续传专项（大文件上传/下载/续传/跳过/拖出）
+        run: python tests/test_resume.py

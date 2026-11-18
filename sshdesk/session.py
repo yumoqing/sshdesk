@@ -50,6 +50,19 @@ class SSHError(Exception):
     pass
 
 
+class TransferCancelled(SSHError):
+    """用户取消传输。已经写下去的部分保留，下次同一个目标会从断点继续。"""
+
+
+#: SFTP 块大小与流水线深度。大文件全靠 pipelining（同时挂 16 个 WRITE/READ 在途）才跑得满带宽；
+#: 块太小（32K 默认）在高延迟链路上会退化成一问一答。
+SFTP_CHUNK = 256 * 1024
+SFTP_MAX_REQUESTS = 16
+#: 单块读写的等待上限。传输本身不设总超时（大文件本来就慢，180s 一定不够），
+#: 只判断"卡住了"：单块超过这个时间没有任何进展才算链路断开。
+SFTP_STALL = 120.0
+
+
 class _Loop:
     """常驻 asyncio 循环（后台线程），同步接口通过它调度协程。"""
 
@@ -158,6 +171,9 @@ class SSHSession:
         self.node = None
         self._chan: Optional[ShellChannel] = None
         self._sftp = None
+        #: 上一次传输的决策，给界面显示"续传/跳过"用
+        #: {"path", "mode": "full"|"resume"|"skip", "offset", "total", "sent"}
+        self.transfer_info: dict = {}
 
     # ---------- 连接 ----------
     def connect(self) -> "SSHSession":
@@ -348,47 +364,128 @@ class SSHSession:
     def remove(self, path: str) -> None:
         self.loop.run(self._sftp_client().remove(path), timeout=30)
 
+    def stat_info(self, path: str) -> Tuple[int, float]:
+        """(size, mtime)。文件不存在时抛异常。"""
+        a = self.loop.run(self._sftp_client().stat(path), timeout=30)
+        return int(a.size or 0), float(a.mtime or 0)
+
+    def _stat_or_none(self, path: str):
+        try:
+            return self.stat_info(path)
+        except Exception:                        # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _plan(total: int, have: Optional[int], offset: Optional[int]):
+        """决定 "跳过 / 续传 / 整个重传"，返回 (offset, mode)。"""
+        if offset is None:
+            if have is not None and have == total:
+                return total, "skip"
+            if have is not None and 0 < have < total:
+                return have, "resume"
+            return 0, "full"
+        offset = max(0, min(int(offset), total))
+        if total and offset == total:
+            return offset, "skip"
+        return offset, ("resume" if offset else "full")
+
     def upload(self, local: str, remote: str,
-               progress: Optional[Callable[[int, int], None]] = None) -> int:
+               progress: Optional[Callable[[int, int], None]] = None,
+               offset: Optional[int] = None,
+               stop: Optional[object] = None) -> int:
+        """上传本地文件；返回**本次实际传的字节数**。
+
+        - `offset=None`：自己判断断点（远端更短 → 从远端长度续传；一样长 → 跳过）
+        - `offset=n`：按调用方算好的断点传（界面已经探过一遍，省一次来回）
+        - `stop`：`threading.Event`，置位后下一块之前中止并抛 `TransferCancelled`，
+          已经写下去的部分留在远端，下次同一个目标自动续传
+        """
         sftp = self._sftp_client()
         total = os.path.getsize(local)
-        chunk = 256 * 1024
+        info = self._stat_or_none(remote) if offset is None else None
+        offset, mode = self._plan(total, info[0] if info else None, offset)
+        self.transfer_info = {"path": remote, "mode": mode, "offset": offset,
+                              "total": total, "sent": 0}
+        if mode == "skip":
+            if progress:
+                progress(total, total)
+            return 0
 
         async def _put():
             sent = 0
-            async with sftp.open(remote, "wb") as fh:
+            pos = offset
+            # 续传必须 r+b：wb 会在打开时把已传的部分截掉
+            async with sftp.open(remote, "r+b" if offset else "wb",
+                                 block_size=SFTP_CHUNK,
+                                 max_requests=SFTP_MAX_REQUESTS) as fh:
                 with open(local, "rb") as src:
+                    src.seek(offset)
+                    if progress:
+                        progress(pos, total)
                     while True:
-                        data = src.read(chunk)
+                        if stop is not None and stop.is_set():
+                            raise TransferCancelled("上传已取消：%s" % remote)
+                        data = src.read(SFTP_CHUNK)
                         if not data:
                             break
-                        await fh.write(data)
+                        try:
+                            await asyncio.wait_for(fh.write(data, pos), SFTP_STALL)
+                        except asyncio.TimeoutError:
+                            raise SSHError("传输停滞：%d 秒没有进展（%s）" % (SFTP_STALL, remote))
+                        pos += len(data)
                         sent += len(data)
                         if progress:
-                            progress(sent, total)
+                            progress(pos, total)
             return sent
 
-        return self.loop.run(_put(), timeout=180)
+        sent = self.loop.run(_put(), timeout=None)
+        self.transfer_info["sent"] = sent
+        return sent
 
     def download(self, remote: str, local: str,
-                 progress: Optional[Callable[[int, int], None]] = None) -> int:
+                 progress: Optional[Callable[[int, int], None]] = None,
+                 offset: Optional[int] = None,
+                 stop: Optional[object] = None) -> int:
+        """下载远端文件；返回本次实际传的字节数。断点/取消语义同 upload（看本地已有多大）。"""
         sftp = self._sftp_client()
         total = self.stat_size(remote)
-        chunk = 256 * 1024
+        have = os.path.getsize(local) if os.path.isfile(local) else None
+        offset, mode = self._plan(total, have, offset)
+        self.transfer_info = {"path": remote, "mode": mode, "offset": offset,
+                              "total": total, "sent": 0}
+        if mode == "skip":
+            if progress:
+                progress(total, total)
+            return 0
         os.makedirs(os.path.dirname(os.path.abspath(local)) or ".", exist_ok=True)
 
         async def _get():
             done = 0
-            async with sftp.open(remote, "rb") as fh:
-                with open(local, "wb") as dst:
+            pos = offset
+            async with sftp.open(remote, "rb",
+                                 block_size=SFTP_CHUNK,
+                                 max_requests=SFTP_MAX_REQUESTS) as fh:
+                with open(local, "r+b" if offset else "wb") as dst:
+                    dst.seek(offset)
+                    dst.truncate(offset)     # 去掉比远端多的残留尾巴
+                    if progress:
+                        progress(pos, total)
                     while True:
-                        data = await fh.read(chunk)
+                        if stop is not None and stop.is_set():
+                            raise TransferCancelled("下载已取消：%s" % remote)
+                        try:
+                            data = await asyncio.wait_for(fh.read(SFTP_CHUNK, pos), SFTP_STALL)
+                        except asyncio.TimeoutError:
+                            raise SSHError("传输停滞：%d 秒没有进展（%s）" % (SFTP_STALL, remote))
                         if not data:
                             break
                         dst.write(data)
+                        pos += len(data)
                         done += len(data)
                         if progress:
-                            progress(done, total)
+                            progress(pos, total)
             return done
 
-        return self.loop.run(_get(), timeout=180)
+        sent = self.loop.run(_get(), timeout=None)
+        self.transfer_info["sent"] = sent
+        return sent

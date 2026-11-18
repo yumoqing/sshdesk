@@ -1,5 +1,8 @@
 """端到端测试：本地起 fake SSH 服务器，验密码/密钥登录、跳板、SFTP 上传下载、shell 往返、GUI 多标签与字体缩放。
 
+大文件断点续传的用例单独在 tests/test_resume.py（那套会真搬几 MB、反复开关进度框，
+混在长流程里容易踩到与本功能无关的 PySide 事件队列老问题）。
+
 用法：python tests/test_client.py
 """
 
