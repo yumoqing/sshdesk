@@ -17,8 +17,8 @@ from typing import List, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import (QApplication, QInputDialog, QLabel, QLineEdit, QMessageBox,
-                               QTreeWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QDockWidget, QInputDialog, QLabel, QLineEdit,
+                               QMessageBox, QStatusBar, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from bricks_qt import Ctx, build, load_file
 from bricks_qt import theme as _theme
@@ -87,6 +87,20 @@ class SessionPage:
             self.term.set_font_family(fam)
         except Exception:                   # noqa: BLE001
             pass
+        self.on_state = None                # 状态文字回调，宿主接到状态栏/页签
+        self.term.connected_changed.connect(self._on_conn_state)
+
+    # ---- 通道状态 ----
+    def _on_conn_state(self, alive: bool) -> None:
+        """通道结束要说到界面上：否则状态栏一直写「已连接」，敲键全被 send() 静默丢掉。"""
+        if alive:
+            return
+        try:
+            self.term.feed("\r\n\x1b[31m[连接已断开 —— 点「重连」重新连接]\x1b[0m\r\n".encode("utf-8"))
+        except Exception:                   # noqa: BLE001
+            pass
+        if callable(self.on_state):
+            self.on_state("连接已断开（点「重连」重新连接）")
 
     # ---- 兼容旧接口（测试/脚本用）----
     @property
@@ -166,8 +180,10 @@ class MainWindow(BricksWindow):
         self.pages_: List[SessionPage] = []
         if hasattr(self.tree, "setHeaderLabels"):
             self.tree.setHeaderLabels(["会话"])
+        self._install_dock(ctx)
 
         # .ui 里的 script 名字 → Python 函数
+        ctx.on("toggle_sessions", lambda *a: self.toggle_sessions())
         ctx.on("new_session", lambda *a: self.new_session())
         ctx.on("manage_sessions", lambda *a: self.manage_sessions())
         ctx.on("connect_selected", lambda *a: self.connect_selected())
@@ -192,6 +208,38 @@ class MainWindow(BricksWindow):
             self.setWindowIcon(QIcon(_app_asset("sshdesk.png")))
         self.font_label.setText("字号 %d" % self.cfg.font_size)
         self.fill_sessions()
+
+    # ---------------- 左侧会话窗：可浮动 / 可关闭 / 可拖窄 ----------------
+    def _install_dock(self, ctx: Ctx) -> None:
+        """.ui 里的 left 只是个 VBox：装进 QDockWidget 才能拖出去浮动、关闭、拖窄。"""
+        left: QWidget = ctx.refs["left"]
+        left.setMinimumWidth(150)
+        left.setMaximumWidth(16777215)      # .ui 里的 px 宽度是 min==max 硬锁，这里解掉
+        dock = QDockWidget("会话", self)
+        dock.setObjectName("sessions_dock")
+        dock.setFeatures(QDockWidget.DockWidgetMovable
+                         | QDockWidget.DockWidgetFloatable
+                         | QDockWidget.DockWidgetClosable)
+        dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        dock.setWidget(left)
+        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
+        self.dock = dock
+        self.resizeDocks([dock], [280], Qt.Horizontal)
+        # 工具栏横跨整窗、状态条落到窗口底部；否则 dock 会顶到最左边，把工具栏挤到右边去
+        bar = ctx.refs.get("toolbar")
+        if bar is not None:
+            self.setMenuWidget(bar)
+        sb = QStatusBar()
+        sb.addWidget(ctx.refs["status"], 1)
+        self.setStatusBar(sb)
+        btn = ctx.refs.get("btn_sessions")
+        if btn is not None:
+            btn.setCheckable(True)
+            btn.setChecked(True)
+            dock.visibilityChanged.connect(lambda on: btn.setChecked(bool(on)))
+
+    def toggle_sessions(self) -> None:
+        self.dock.setVisible(not self.dock.isVisible())
 
     # ---------------- 会话列表 ----------------
     def fill_sessions(self, keyword: str = "") -> None:
@@ -243,6 +291,7 @@ class MainWindow(BricksWindow):
         self.pages_.append(page)
         self.tabs.addTab(holder, profile.name or profile.host)
         self.tabs.setCurrentWidget(holder)
+        page.on_state = lambda msg, p=page: self._page_state(p, msg)
 
         try:
             self.status_label.setText(page.connect())
@@ -252,6 +301,16 @@ class MainWindow(BricksWindow):
             self.close_tab(self.tabs.indexOf(holder), drop_only=True)
             return
         page.term.setFocus()
+
+    def _page_state(self, page: "SessionPage", msg: str) -> None:
+        """把会话状态同时写到状态栏和页签标题上。"""
+        self.status_label.setText(msg)
+        holder = getattr(page, "holder", None)
+        idx = self.tabs.indexOf(holder) if holder is not None else -1
+        if idx < 0:
+            return
+        name = page.profile.name or page.profile.host
+        self.tabs.setTabText(idx, name + ("（已断开）" if "断开" in msg else ""))
 
     def close_tab(self, idx: int, drop_only: bool = False) -> None:
         if idx is None or idx < 0 or idx >= self.tabs.count():
@@ -292,9 +351,9 @@ class MainWindow(BricksWindow):
             return
         page.close_session()
         try:
-            self.status_label.setText(page.connect())
+            self._page_state(page, page.connect())
         except SSHError as e:
-            self.status_label.setText("重连失败：%s" % e)
+            self._page_state(page, "重连失败：%s" % e)
 
     # ---------------- 字号 ----------------
     def bump_font(self, delta: int) -> None:

@@ -437,6 +437,67 @@ def main() -> int:
 
     check("终端中文输入", t_ime)
 
+    # ---------- 掉线必须说出来（原来通道结束是静默的，敲键全被丢掉）----------
+    def t_disconnect():
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication(sys.argv[:1])
+        from bricks_qt import Ctx
+        from sshdesk.app import UI_DIR, SessionPage
+        from sshdesk.config import AppConfig
+        page = SessionPage(key_prof, AppConfig(), Ctx(base_dir=UI_DIR))
+        said = []
+        page.on_state = said.append
+        page.connect()
+        assert page.session is not None
+        page.session._chan.close()                       # 服务端关通道 = 掉线
+        deadline = time.time() + 6
+        while time.time() < deadline and not said:
+            app.processEvents()
+            time.sleep(0.03)
+        assert said, "通道结束后没有通知宿主（状态栏会一直写「已连接」，敲键被静默丢弃）"
+        assert "断开" in said[0], "提示文案里没有「断开」：%r" % (said[0],)
+        assert "断开" in page.term.screen_text(), "终端里没画出断线提示：%r" % page.term.screen_text()[-60:]
+        page.close_session()
+
+    check("掉线提示", t_disconnect)
+
+    # ---------- 真实按键路由：焦点在终端上、键真的走事件链送到远端 ----------
+    def t_keyroute():
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
+        app = QApplication.instance() or QApplication(sys.argv[:1])
+        from bricks_qt import Ctx
+        from sshdesk.app import UI_DIR, SessionPage
+        from sshdesk.config import AppConfig
+        page = SessionPage(key_prof, AppConfig(), Ctx(base_dir=UI_DIR))
+        win = QWidget()
+        lay = QVBoxLayout(win)
+        lay.addWidget(page.widget)
+        win.resize(900, 520)
+        win.show()
+        app.processEvents()
+        page.connect()
+        for _ in range(20):
+            app.processEvents()
+            time.sleep(0.03)
+        fw = QApplication.focusWidget()
+        assert fw is page.term, "连上以后焦点不在终端上（键会被别的控件吃掉）：%r" % (fw,)
+        QTest.keyClicks(page.term, "abc123")
+        QTest.keyClick(page.term, Qt.Key_Return)
+        deadline = time.time() + 6
+        while time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.03)
+            if "abc123" in page.term.screen_text():
+                break
+        assert "abc123" in page.term.screen_text(), \
+            "按键没走到远端/没回显：%r" % page.term.screen_text()[-60:]
+        page.close_session()
+        win.close()
+
+    check("真实按键路由", t_keyroute)
+
     check("多标签 + 字体缩放 + 文件面板", t_gui)
 
     # ---------- 收尾 ----------

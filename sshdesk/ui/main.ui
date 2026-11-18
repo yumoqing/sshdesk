@@ -70,6 +70,20 @@
           ]
         },
         {
+          "widgettype": "Button",
+          "id": "btn_sessions",
+          "options": {
+            "label": "会话"
+          },
+          "binds": [
+            {
+              "event": "click",
+              "actiontype": "script",
+              "script": "toggle_sessions"
+            }
+          ]
+        },
+        {
           "widgettype": "Filler",
           "options": {}
         },
@@ -136,7 +150,6 @@
           "widgettype": "VBox",
           "id": "left",
           "options": {
-            "width": "280px",
             "height": "100%"
           },
           "subwidgets": [
