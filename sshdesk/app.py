@@ -178,8 +178,8 @@ class MainWindow(BricksWindow):
         self.font_label: QLabel = ctx.refs["font_label"]
         self.search = ctx.refs["search"]
         self.pages_: List[SessionPage] = []
-        if hasattr(self.tree, "setHeaderLabels"):
-            self.tree.setHeaderLabels(["会话"])
+        if hasattr(self.tree, "setHeaderHidden"):
+            self.tree.setHeaderHidden(True)      # dock 标题已经写着「会话」，表头再写一遍是重复
         self._install_dock(ctx)
 
         # .ui 里的 script 名字 → Python 函数
