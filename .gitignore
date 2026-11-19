@@ -2,6 +2,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+dist_new/
 out/
 *.png
 tests/_fake_host_key
