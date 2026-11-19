@@ -8,6 +8,9 @@
     macOS    dist/sshdesk.app（--windowed 时 PyInstaller 自动成 bundle）
     Linux    dist/sshdesk/sshdesk
 
+输出目录可用环境变量 SSHDESK_DISTPATH / SSHDESK_WORKPATH 改：`dist\\sshdesk` 里的 exe
+正在运行时文件被锁，重打包前先打到别处（例如 dist_new），关掉旧窗口再换过来。
+
 注意：bricks 的 .ui 文件必须打进包里（sshdesk/ui），否则界面上不来。
 """
 
@@ -29,10 +32,14 @@ def main() -> int:
     console = "--console" in sys.argv
     mode = "--onefile" if onefile else "--onedir"
     entry = os.path.join(ROOT, "tools", "entry.py")
+    distpath = os.environ.get("SSHDESK_DISTPATH") or os.path.join(ROOT, "dist")
+    workpath = os.environ.get("SSHDESK_WORKPATH") or os.path.join(ROOT, "build")
 
     args = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
             "--name", "sshdesk", mode,
             "--console" if console else "--windowed",
+            "--distpath", distpath,
+            "--workpath", workpath,
             "--paths", ROOT,
             "--hidden-import", "bricks_qt",           # 界面来自 bricks_qt（editable 装法 PyInstaller 可能跟不到，下面再补 --paths）
             "--collect-submodules", "bricks_qt",
@@ -71,13 +78,13 @@ def main() -> int:
         return r.returncode
 
     if sys.platform == "darwin":
-        out = os.path.join(ROOT, "dist", "sshdesk.app")
+        out = os.path.join(distpath, "sshdesk.app")
     elif sys.platform.startswith("win"):
-        out = (os.path.join(ROOT, "dist", "sshdesk", "sshdesk.exe") if not onefile
-               else os.path.join(ROOT, "dist", "sshdesk.exe"))
+        out = (os.path.join(distpath, "sshdesk", "sshdesk.exe") if not onefile
+               else os.path.join(distpath, "sshdesk.exe"))
     else:
-        out = (os.path.join(ROOT, "dist", "sshdesk", "sshdesk") if not onefile
-               else os.path.join(ROOT, "dist", "sshdesk"))
+        out = (os.path.join(distpath, "sshdesk", "sshdesk") if not onefile
+               else os.path.join(distpath, "sshdesk"))
     print("产物:", out, os.path.exists(out))
     return 0
 
