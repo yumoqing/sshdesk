@@ -33,6 +33,7 @@ jobs:
         run: |
           python -m pip install -U pip
           pip install PySide6-Essentials pyte wcwidth json5 paramiko asyncssh jinja2
+          pip install "git+https://github.com/yumoqing/pylice@main"
           pip install "git+https://github.com/yumoqing/bricks-qt@main"
 
       - name: .ui 构建校验（有未适配控件即失败）

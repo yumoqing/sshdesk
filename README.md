@@ -110,16 +110,18 @@ python tests/test_client.py
 
 ## 授权（私有化售卖）
 
-`sshdesk/license.py` 是独立的一层：**Ed25519 签名 + 机器指纹 + 功能位 + 到期 + 心跳宽限**。
-不依赖界面，可以整块搬到别的产品（只换 `APP` 与公钥）。
+授权实现是**独立仓库 [pylice](https://github.com/yumoqing/pylice)**：单文件、零第三方依赖、自带 Ed25519，
+任何离线程序拷一个文件就能用。本仓的 `sshdesk/license.py` 只剩产品参数（app 名、内嵌公钥、试用口径、配置目录）。
+
+    pip install git+https://github.com/yumoqing/pylice      # 或直接拷 pylice.py 进工程
 
 三层分工：
 
 | 文件 | 干什么 |
 |---|---|
-| `sshdesk/license.py` | 客户端：验签、指纹比对、到期/宽限判定、`has(feature)` / `allow(limit, n)`、后台上报心跳 |
-| `tools/license_tool.py` | 签发方：`keygen` 生成密钥、`machine` 看本机机器码、`issue` 出 `.lic`、`verify`/`inspect` 核验 |
-| `tools/license_server.py` | 演示/自用授权服务：校验签名与指纹、按 `license_id` 吊销，回心跳（真运营要补 TLS、吊销表、限速） |
+| `pylice.py`（独立仓） | 全部实现：验签、指纹、到期/宽限判定、`has(feature)` / `allow(limit, n)`、心跳、签发与心跳服务 CLI |
+| `sshdesk/license.py` | 产品参数：app 名、内嵌公钥、试用口径（2 个会话）、配置目录；`License()` 封装 |
+| `tools/license_tool.py` / `tools/license_server.py` | 本仓薄壳，把 app/公钥钉好后转给 `pylice` 的 CLI（`serve` 即心跳+吊销服务） |
 
 日常流程（三步，都不上客户机）：
 
@@ -138,7 +140,7 @@ sshdesk --activate 某某公司.lic
 sshdesk --license            :: 查状态（机器码 / 到期 / 模式），客服排障用
 ```
 
-口径与边界（改之前先读 `license.py` 顶部注释）：
+口径与边界（改之前先读 `pylice.py` 顶部注释）：
 
 - **签名覆盖除 `sig` 外的全部字段**（规范化 JSON），手改一个字就验签失败，不靠"藏"。
 - **指纹三取二**：系统 UUID / 主网卡 MAC / 系统盘序列号，三项都要对上；license 里留空的那项不参与比对。
