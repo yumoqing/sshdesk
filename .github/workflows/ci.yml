@@ -36,6 +36,13 @@ jobs:
           pip install "git+https://github.com/yumoqing/pylice@main"
           pip install "git+https://github.com/yumoqing/bricks-qt@main"
 
+      # session.py 依赖 appPublic.sshx；appPublic 自带一堆重依赖，CI 里只克隆取 sshx
+      - name: 取 appPublic（sshx）
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/yumoqing/appPublic.git "$RUNNER_TEMP/appPublic"
+          echo "SSHDESK_APPPUBLIC=$RUNNER_TEMP/appPublic" >> "$GITHUB_ENV"
+
       - name: .ui 构建校验（有未适配控件即失败）
         shell: bash
         run: |
