@@ -135,6 +135,20 @@
               "script": "font_reset"
             }
           ]
+        },
+        {
+          "widgettype": "Button",
+          "id": "btn_license",
+          "options": {
+            "label": "授权"
+          },
+          "binds": [
+            {
+              "event": "click",
+              "actiontype": "script",
+              "script": "license_info"
+            }
+          ]
         }
       ]
     },

@@ -15,7 +15,7 @@ import os
 import sys
 from typing import List, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QApplication, QDockWidget, QInputDialog, QLabel, QLineEdit,
                                QMessageBox, QStatusBar, QTreeWidgetItem, QVBoxLayout, QWidget)
@@ -28,6 +28,7 @@ from bricks_qt.terminal import Terminal
 
 from .config import AppConfig, HostProfile, default_mono_font
 from .dialogs import HostDialog, SessionManager
+from .license import License
 from .session import SSHError, SSHSession
 
 UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
@@ -194,6 +195,7 @@ class MainWindow(BricksWindow):
         ctx.on("filter_sessions", lambda n, e, text: self.fill_sessions(str(text or "")))
         ctx.on("session_activated", lambda n, e, label: self.connect_by_name(str(label or "")))
         ctx.on("close_tab", lambda n, e, idx: self.close_tab(int(idx)))
+        ctx.on("license_info", lambda *a: self.show_license())
 
         from PySide6.QtGui import QIcon
         icon = QIcon()
@@ -207,7 +209,66 @@ class MainWindow(BricksWindow):
         elif _app_asset("sshdesk.png"):
             self.setWindowIcon(QIcon(_app_asset("sshdesk.png")))
         self.font_label.setText("字号 %d" % self.cfg.font_size)
+        self._init_license()
         self.fill_sessions()
+
+    # ---------------- 授权（license）----------------
+    def _init_license(self) -> None:
+        """启动即算一次授权状态：徽标常驻状态栏，异常才弹一次窗。"""
+        self.license = License()
+        st = self.license.state()
+        self.license_label = QLabel()
+        self.license_label.setToolTip("点工具栏「授权」可查看机器码 / 粘贴授权文件")
+        self.statusBar().addPermanentWidget(self.license_label)
+        self._refresh_license_badge()
+        hb = (self.license.data or {}).get("heartbeat") or {}
+        if st.ok and hb.get("url"):
+            self.license.heartbeat_async()          # 后台线程，绝不阻塞启动
+        if not st.ok and st.mode != "trial":
+            QTimer.singleShot(0, lambda: self.show_license(warn=True))
+
+    def _refresh_license_badge(self) -> None:
+        st = self.license.state(refresh=True)
+        self.license_label.setText("  " + st.label())
+        color = "#0f766e" if st.mode == "licensed" else ("#a63a0a" if st.ok else "#b91c1c")
+        self.license_label.setStyleSheet("color:%s;" % color)
+
+    def show_license(self, warn: bool = False) -> None:
+        st = self.license.state(refresh=True)
+        box = QMessageBox(self)
+        box.setWindowTitle("授权")
+        box.setIcon(QMessageBox.Warning if (warn or not st.ok) else QMessageBox.Information)
+        box.setText(st.label())
+        info = "机器码：%s\n授权文件：%s" % (self.license.machine_code(), self.license.path)
+        if st.reason:
+            info += "\n说明：%s" % st.reason
+        box.setInformativeText(info)
+        paste = box.addButton("粘贴授权…", QMessageBox.ActionRole)
+        copyb = box.addButton("复制机器码", QMessageBox.ActionRole)
+        box.addButton("关闭", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is paste:
+            self.paste_license()
+        elif box.clickedButton() is copyb:
+            QGuiApplication.clipboard().setText(self.license.machine_code())
+            self.status_label.setText("机器码已复制：%s" % self.license.machine_code())
+
+    def paste_license(self) -> None:
+        text, ok = QInputDialog.getMultiLineText(
+            self, "粘贴授权", "把服务商发来的 .lic 内容整段粘贴进来：", "")
+        if not ok or not (text or "").strip():
+            return
+        try:
+            st = self.license.install(text)
+        except Exception as e:                          # noqa: BLE001
+            QMessageBox.warning(self, "授权无效", str(e)[:400])
+            return
+        self._refresh_license_badge()
+        self.status_label.setText(st.label())
+        if st.ok:
+            QMessageBox.information(self, "授权成功", st.label())
+        else:
+            QMessageBox.warning(self, "授权未生效", "%s\n%s" % (st.label(), st.reason))
 
     # ---------------- 左侧会话窗：可浮动 / 可关闭 / 可拖窄 ----------------
     def _install_dock(self, ctx: Ctx) -> None:
@@ -278,6 +339,14 @@ class MainWindow(BricksWindow):
 
     # ---------------- 标签 ----------------
     def open_tab(self, profile: HostProfile) -> None:
+        allowed, why = self.license.allow("max_sessions", len(self.pages_))
+        if not allowed:                                 # 试用/未授权的会话数上限
+            self.status_label.setText(why)
+            QMessageBox.information(
+                self, "需要授权",
+                "%s\n\n机器码：%s\n点工具栏「授权」可粘贴授权文件。"
+                % (why, self.license.machine_code()))
+            return
         try:
             page = SessionPage(profile, self.cfg, self.ctx)
         except Exception as e:                      # noqa: BLE001
@@ -386,6 +455,25 @@ def main(argv: Optional[List[str]] = None) -> int:
             _emit("%-24s %s@%s:%s %s" % (h.name, h.user, h.host, h.port,
                                          "密码" if h.auth == "password" else "密钥"))
         return 0
+
+    if "--license" in argv:                     # 运维/客服查授权，不需要图形界面
+        lic = License()
+        st = lic.state(refresh=True)
+        _emit("机器码：%s" % lic.machine_code())
+        _emit("状态  ：%s [%s]" % (st.label(), st.mode))
+        _emit("授权文件：%s%s" % (lic.path, "" if os.path.isfile(lic.path) else "（不存在）"))
+        return 0 if st.ok else 1
+
+    if "--activate" in argv:                    # 命令行装授权：sshdesk --activate x.lic
+        i = argv.index("--activate")
+        src = argv[i + 1] if i + 1 < len(argv) else ""
+        if not src or not os.path.isfile(src):
+            _emit("用法：sshdesk --activate <授权文件.lic>")
+            return 2
+        with open(src, encoding="utf-8") as fh:
+            st = License().install(fh.read())
+        _emit("状态：%s [%s]" % (st.label(), st.mode))
+        return 0 if st.ok else 1
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     _apply_ui_font(app)

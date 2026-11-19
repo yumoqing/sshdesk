@@ -51,3 +51,6 @@ jobs:
 
       - name: 断点续传专项（大文件上传/下载/续传/跳过/拖出）
         run: python tests/test_resume.py
+
+      - name: 授权（签名/指纹/到期/宽限）
+        run: python tests/test_license.py

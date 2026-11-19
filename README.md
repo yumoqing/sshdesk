@@ -108,6 +108,51 @@ python tests/test_client.py
 
 假服务器的实现见 `tests/fake_sshd.py`：认证、exec、极简 shell REPL、chroot 风格的 SFTP、转发。
 
+## 授权（私有化售卖）
+
+`sshdesk/license.py` 是独立的一层：**Ed25519 签名 + 机器指纹 + 功能位 + 到期 + 心跳宽限**。
+不依赖界面，可以整块搬到别的产品（只换 `APP` 与公钥）。
+
+三层分工：
+
+| 文件 | 干什么 |
+|---|---|
+| `sshdesk/license.py` | 客户端：验签、指纹比对、到期/宽限判定、`has(feature)` / `allow(limit, n)`、后台上报心跳 |
+| `tools/license_tool.py` | 签发方：`keygen` 生成密钥、`machine` 看本机机器码、`issue` 出 `.lic`、`verify`/`inspect` 核验 |
+| `tools/license_server.py` | 演示/自用授权服务：校验签名与指纹、按 `license_id` 吊销，回心跳（真运营要补 TLS、吊销表、限速） |
+
+日常流程（三步，都不上客户机）：
+
+```bat
+:: 1) 只做一次：生成签发密钥（私钥落在 ~/.sshdesk-license/，不进仓库，丢了只能换公钥重发）
+python tools/license_tool.py keygen
+
+:: 2) 客户发来机器码（界面「授权 → 复制机器码」，或 sshdesk --license）
+python tools/license_tool.py issue --org 某某公司 --days 365 ^
+    --features sftp,resume --max-sessions 5 ^
+    --machine S1-xxxxxxxxxxxxxxxx-xxxxxxxxxxxxxxxx-xxxxxxxxxxxxxxxx-xx ^
+    --heartbeat https://license.example.com/hb --out 某某公司.lic
+
+:: 3) 客户装授权：界面「授权 → 粘贴授权…」整段粘贴，或命令行
+sshdesk --activate 某某公司.lic
+sshdesk --license            :: 查状态（机器码 / 到期 / 模式），客服排障用
+```
+
+口径与边界（改之前先读 `license.py` 顶部注释）：
+
+- **签名覆盖除 `sig` 外的全部字段**（规范化 JSON），手改一个字就验签失败，不靠"藏"。
+- **指纹三取二**：系统 UUID / 主网卡 MAC / 系统盘序列号，三项都要对上；license 里留空的那项不参与比对。
+  换网卡或换盘 → 重新签发，不会误锁。
+- **没有授权文件 = 30 天试用**，试用最多 2 个会话；到期后仍可开 1 个会话取数据（不把客户数据锁死）。
+- **心跳不是"必须在线"**：`interval_days` 之后界面提示该联网，`grace_days` 用完才降级到 1 个会话；
+  从安装那刻起就享受同样宽限，纯内网客户装完能正常跑。
+- **时钟回拨**（记录历史最大值，回退超 6 小时）判异常，用来抬高"改系统时间续命"的成本，不是安全边界。
+- 当前真正执行的门禁是 **会话数上限**（`open_tab` 里一行 `license.allow("max_sessions", …)`）；
+  功能位已随授权下发，要用在别处只需一行 `if not self.license.has("jump"): …`。
+
+⚠️ 这套是**提高拷贝成本**，不是防破解。真要守住核心，得让核心不在客户机上（见 README 之外的交付形态讨论）。
+PyArmor/Nuitka 之类只影响"读代码"的成本，与 license 无关。
+
 ## 已知边界
 
 - 终端是自绘的最小实现：全屏程序（vim/htop）能用，但鼠标上报、真彩色（24bit）、滚动历史回看还没做。
