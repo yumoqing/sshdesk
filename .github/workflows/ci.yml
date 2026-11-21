@@ -43,22 +43,10 @@ jobs:
           git clone --depth 1 https://github.com/yumoqing/appPublic.git "$RUNNER_TEMP/appPublic"
           echo "SSHDESK_APPPUBLIC=$RUNNER_TEMP/appPublic" >> "$GITHUB_ENV"
 
-      - name: .ui 构建校验（有未适配控件即失败）
-        shell: bash
-        run: |
-          for f in sshdesk/ui/*.ui; do
-            echo "== $f"
-            python -m bricks_qt.cli check "$f" --strict
-          done
+      # 本地和 CI 用同一个入口：.ui 校验 → 窗口自检 → 原生冒烟 → 续传 → 授权 → 端到端
+      - name: 全量检查（tests/run_all.py）
+        run: python tests/run_all.py
 
-      - name: 窗口自检（bricks 渲染整窗）
-        run: python -m sshdesk --selftest
-
-      - name: 原生控件冒烟（Terminal / RemoteFiles）
-        run: python tests/native_smoke.py
-
-      - name: 断点续传专项（大文件上传/下载/续传/跳过/拖出）
-        run: python tests/test_resume.py
-
-      - name: 授权（签名/指纹/到期/宽限）
-        run: python tests/test_license.py
+      # 端到端那套偶发段错误是控件生命周期问题（见 817bf42），反复跑 3 轮守住它
+      - name: 端到端稳定性（连跑 3 轮，防段错误回潮）
+        run: python tests/run_all.py -k e2e --repeat 3
