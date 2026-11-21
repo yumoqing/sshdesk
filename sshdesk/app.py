@@ -163,6 +163,29 @@ class SessionPage:
                 pass
             self.session = None
 
+    def dispose(self) -> None:
+        """拆掉一整页（关标签/测试收尾都走这里）。
+
+        不能把控件留给 Python 的循环垃圾回收：`term.connected_changed` 连着本对象，
+        page ↔ term 形成引用环，只有 gc 能回收它；而 gc 可能在 Qt 派发事件的过程中跑，
+        在 processEvents 里析构控件就会段错误（Linux/offscreen 实测 6/8 崩）。
+        所以这里先断开信号打断环，再把控件交给事件循环 deleteLater 删除。
+        """
+        self.close_session()
+        try:
+            self.term.connected_changed.disconnect(self._on_conn_state)
+        except (RuntimeError, TypeError):       # 已断开或控件已销毁
+            pass
+        self.on_state = None
+        w = getattr(self, "widget", None)
+        self.widget = None
+        if w is not None:
+            try:
+                w.setParent(None)
+                w.deleteLater()
+            except RuntimeError:
+                pass
+
 
 class MainWindow(BricksWindow):
     """主窗口：bricks .ui + 宿主动作。"""
@@ -181,6 +204,7 @@ class MainWindow(BricksWindow):
         self.font_label: QLabel = ctx.refs["font_label"]
         self.search = ctx.refs["search"]
         self.pages_: List[SessionPage] = []
+        self._trash: List[QWidget] = []             # 等事件循环删掉的旧页
         if hasattr(self.tree, "setHeaderHidden"):
             self.tree.setHeaderHidden(True)      # dock 标题已经写着「会话」，表头再写一遍是重复
         self._install_dock(ctx)
@@ -390,11 +414,15 @@ class MainWindow(BricksWindow):
         page = next((p for p in self.pages_ if getattr(p, "holder", None) is holder), None)
         if page is not None:
             try:
-                page.close_session()
-            except Exception:                       # noqa: BLE001
+                page.dispose()                  # 停通道 + 断信号 + 控件交给事件循环删
+            except Exception:                   # noqa: BLE001
                 pass
             self.pages_.remove(page)
         self.tabs.removeTab(idx)
+        if holder is not None:
+            self._trash.append(holder)          # 留住包装对象，等 Qt 真删完再放手
+            holder.deleteLater()
+            QTimer.singleShot(0, self._trash.clear)
         if not drop_only:
             self.status_label.setText("已关闭会话")
 

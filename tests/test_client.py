@@ -41,6 +41,26 @@ def check(name, fn):
         traceback.print_exc(limit=2)
 
 
+def drop_widget(widget) -> None:
+    """把测试里造的控件交给事件循环删掉，别留给 gc。
+
+    page.term 的 connected_changed 连着宿主对象，会形成只有 gc 能回收的引用环；
+    gc 可能在 Qt 派发事件途中跑，在 processEvents 里析构控件就是段错误（实测 6/8 崩）。
+    """
+    if widget is None:
+        return
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance()
+    try:
+        widget.close()
+        widget.setParent(None)
+        widget.deleteLater()
+    except RuntimeError:                            # 控件已被父控件带走
+        return
+    if app is not None:
+        app.processEvents()
+
+
 def sha256(path: str) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -347,6 +367,8 @@ def main() -> int:
         win.close()
         for i in reversed(range(win.tabs.count())):
             win.close_tab(i)
+        app.processEvents()
+        drop_widget(win)
 
     # ---------- 终端彩色输出必须真的画出来（回归：pyte 的颜色是字符串/十六进制/int，
     # 早期直接拿字符串下标 ANSI16 会抛异常 → paintEvent 中断，只剩第一个彩色字符之前的内容）----------
@@ -384,7 +406,7 @@ def main() -> int:
         assert green, "绿色提示符没画出来"
         assert orange, "256 色调色板没画出来"
         assert red, "真彩没画出来"
-        tv.close()
+        drop_widget(tv)
 
     check("终端彩色输出渲染", t_color)
 
@@ -414,6 +436,7 @@ def main() -> int:
         app.processEvents()
         assert fb.cwd == root, ".. 没回上级：%s != %s" % (fb.cwd, root)
         sess.close()
+        drop_widget(fb)
 
     check("目录 .. / 双击进入", t_nav)
 
@@ -463,6 +486,7 @@ def main() -> int:
         assert open(got[0], encoding="utf-8").read() == "dropped 内容 123", "拖出内容不对"
         sess.remove("/拖入测试.txt")
         sess.close()
+        drop_widget(fb)
 
     check("拖拽上传 / 拖出下载", t_drop_upload)
 
@@ -501,6 +525,7 @@ def main() -> int:
         assert "中文输入测试" in txt, "中文没发出去/没回显：%r" % txt[-80:]
         tv.detach()
         sess.close()
+        drop_widget(tv)
 
     check("终端中文输入", t_ime)
 
@@ -524,7 +549,8 @@ def main() -> int:
         assert said, "通道结束后没有通知宿主（状态栏会一直写「已连接」，敲键被静默丢弃）"
         assert "断开" in said[0], "提示文案里没有「断开」：%r" % (said[0],)
         assert "断开" in page.term.screen_text(), "终端里没画出断线提示：%r" % page.term.screen_text()[-60:]
-        page.close_session()
+        page.dispose()
+        drop_widget(page.widget)
 
     check("掉线提示", t_disconnect)
 
@@ -560,8 +586,9 @@ def main() -> int:
                 break
         assert "abc123" in page.term.screen_text(), \
             "按键没走到远端/没回显：%r" % page.term.screen_text()[-60:]
-        page.close_session()
-        win.close()
+        page.dispose()
+        drop_widget(page.widget)
+        drop_widget(win)
 
     check("真实按键路由", t_keyroute)
 
