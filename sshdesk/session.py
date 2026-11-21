@@ -164,6 +164,33 @@ def _jumpers(p: HostProfile) -> List[dict]:
     return [d]
 
 
+#: 直连探测的超时（秒）。只做 TCP 握手，局域网/公网都够；探测不到就照旧走跳板。
+DIRECT_PROBE_TIMEOUT = 1.5
+
+
+def _probe_direct(host: str, port: int, timeout: float = DIRECT_PROBE_TIMEOUT) -> bool:
+    """目标能不能**直连**：只做一次 TCP 握手，连不上（拒绝/超时/解析失败）都算不可达。
+
+    这是决定"要不要跳板机"的唯一依据，所以必须便宜且绝不抛异常：
+    - 整个探测放进子线程并 join 限时，DNS 卡住也不会把界面拖住；
+    - 探测线程是 daemon，超时后自己烂在后台，不影响主流程。
+    """
+    import socket
+
+    def _try() -> bool:
+        try:
+            with socket.create_connection((host, int(port or 22)), timeout):
+                return True
+        except (OSError, ValueError):
+            return False
+
+    box: dict = {}
+    t = threading.Thread(target=lambda: box.update(ok=_try()), daemon=True)
+    t.start()
+    t.join(timeout)
+    return bool(box.get("ok"))
+
+
 class SSHSession:
     def __init__(self, profile: HostProfile):
         self.profile = profile
@@ -174,11 +201,16 @@ class SSHSession:
         #: 上一次传输的决策，给界面显示"续传/跳过"用
         #: {"path", "mode": "full"|"resume"|"skip", "offset", "total", "sent"}
         self.transfer_info: dict = {}
+        #: 上一次连接实际走的路径：True=经跳板机，False=直连
+        self.via_jump: bool = False
+        #: 给界面看的一句话：跳没跳、为什么（空 = 没配跳板机）
+        self.route_note: str = ""
 
     # ---------- 连接 ----------
-    def connect(self) -> "SSHSession":
+    def _open(self, jumpers: List[dict]) -> None:
+        """按给定的跳板链建连（`jumpers=[]` 就是直连）。"""
         p = self.profile
-        kw = dict(host=p.host, username=p.user, port=p.port or 22, jumpers=_jumpers(p))
+        kw = dict(host=p.host, username=p.user, port=p.port or 22, jumpers=jumpers)
         if p.auth == "password" and p.password:
             kw["password"] = p.password
         else:
@@ -188,12 +220,35 @@ class SSHSession:
         # SSHNode.__init__ 会 print 整个配置（含密码），这里静音，避免落到日志
         with contextlib.redirect_stdout(io.StringIO()):
             self.node = SSHNode(**kw)
+        self.loop.run(self.node.connect(), timeout=30)
+
+    def connect(self) -> "SSHSession":
+        p = self.profile
+        jumpers = _jumpers(p)
+        self.via_jump = bool(jumpers)
+        self.route_note = ""
+        if jumpers and _probe_direct(p.host, p.port or 22):
+            # 目标自己就连得上 → 跳板机是多余的一跳（多一个故障点 + 多一次握手），直接连
+            jumpers = []
+            self.via_jump = False
+            self.route_note = "直连可达，已跳过跳板机 %s" % p.jump_host
         try:
-            self.loop.run(self.node.connect(), timeout=30)
+            self._open(jumpers)
         except SSHError as e:
-            if "Permission denied" in str(e) or "authentication" in str(e).lower():
-                raise SSHError("认证失败：%s" % str(e)[:160])
-            raise
+            msg = str(e)
+            if "Permission denied" in msg or "authentication" in msg.lower():
+                raise SSHError("认证失败：%s" % msg[:160])
+            if not jumpers and p.jump_host:
+                # 探测说可达、真连却失败（握手被墙/端口是别的服务）→ 退回跳板机再试一次
+                try:
+                    self._open(_jumpers(p))
+                except SSHError as e2:
+                    raise SSHError("直连失败（%s），经跳板机也失败（%s）"
+                                   % (msg[:100], str(e2)[:100]))
+                self.via_jump = True
+                self.route_note = "直连失败，已改走跳板机 %s" % p.jump_host
+            else:
+                raise
         try:
             self.host_key_status = self._check_host_key()
         except SSHError:

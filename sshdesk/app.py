@@ -144,8 +144,10 @@ class SessionPage:
             self.term._apply_size_to_chan()
             self.files.attach(self.session)
             self.show_files(False)
-            return "已连接 %s（%s）" % (self.profile.display(),
-                                      getattr(self.session, "host_key_status", ""))
+            note = getattr(self.session, "route_note", "")
+            return "已连接 %s（%s）%s" % (self.profile.display(),
+                                        getattr(self.session, "host_key_status", ""),
+                                        " · " + note if note else "")
         finally:
             QGuiApplication.restoreOverrideCursor()
 

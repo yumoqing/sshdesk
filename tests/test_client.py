@@ -99,14 +99,75 @@ def main() -> int:
             return
         raise AssertionError("错误密码竟然连上了")
 
-    def t_jump():
+    def t_probe():
+        """直连探测本身：本机监听端口=可达，没人监听=不可达，且必须有超时上限。"""
+        from sshdesk.session import _probe_direct
+        assert _probe_direct("127.0.0.1", 2201, 2.0) is True, "本机监听端口却探测成不可达"
+        assert _probe_direct("127.0.0.1", 2299, 1.0) is False, "没人监听的端口却探测成可达"
+        t0 = time.time()
+        _probe_direct("10.255.255.1", 22, 0.6)          # 黑洞地址：必须按时返回（值不关心）
+        assert time.time() - t0 < 3.0, "探测没有超时上限：%.1fs" % (time.time() - t0)
+
+    def t_jump_skip():
+        """**目标直连可达时不该用跳板机**（本地 127.0.0.1:2201 必然可达）。"""
         s = SSHSession(jump_prof).connect()
         try:
+            assert s.via_jump is False, "直连可达却还走了跳板机"
+            assert "已跳过跳板机" in s.route_note, s.route_note
+            rc, out, _ = s.exec("direct-no-jump")
+            assert "direct-no-jump" in out, out
+        finally:
+            s.close()
+        assert not any(h.events["forward"].is_set() for h in jump_srv.handlers), \
+            "直连可达却仍然开了 direct-tcpip 通道"
+
+    def t_jump():
+        """探测不到直连时才走跳板：把探测钉成不可达（本地目标永远是可达的，没法真造）。"""
+        import sshdesk.session as session_mod
+        old = session_mod._probe_direct
+        session_mod._probe_direct = lambda *a, **kw: False
+        try:
+            s = SSHSession(jump_prof).connect()
+        finally:
+            session_mod._probe_direct = old
+        try:
+            assert s.via_jump is True, "没走跳板机"
             rc, out, _ = s.exec("through-jump")
             assert "through-jump" in out, out
         finally:
             s.close()
         assert any(h.events["forward"].is_set() for h in jump_srv.handlers), "跳板没有被用到"
+
+    def t_jump_fallback():
+        """探测说可达、SSH 却连不上（端口是别的服务）→ 必须退回跳板机再试，不能直接报错。"""
+        import socket as _socket
+        import threading
+
+        srv = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 2205))
+        srv.listen(32)
+
+        def _accept_and_close():
+            while True:
+                try:
+                    c, _ = srv.accept()
+                except OSError:
+                    return
+                c.close()
+
+        threading.Thread(target=_accept_and_close, daemon=True).start()
+        prof = HostProfile(auth="key", key_path=key_path, host="127.0.0.1", port=2205,
+                           user="test", jump_host="127.0.0.1", jump_port=2203,
+                           jump_user="test", jump_auth="key", jump_key_path=key_path)
+        try:
+            SSHSession(prof).connect()
+        except SSHError as e:
+            assert "经跳板机也失败" in str(e), str(e)[:160]
+        else:
+            raise AssertionError("直连和跳板都没连上却成功返回了")
+        finally:
+            srv.close()
 
     def t_sftp_roundtrip():
         s = SSHSession(key_prof).connect()
@@ -214,7 +275,10 @@ def main() -> int:
     check("密码登录 + exec", t_password)
     check("密钥登录（免密）+ exec", t_key)
     check("错误密码被拒", t_bad_password)
-    check("跳板机 direct-tcpip", t_jump)
+    check("直连探测（可达/不可达/限时）", t_probe)
+    check("直连可达则不用跳板机", t_jump_skip)
+    check("直连不可达才用跳板机", t_jump)
+    check("直连失败自动退回跳板机", t_jump_fallback)
     check("SFTP 上传/下载/列表/建目录", t_sftp_roundtrip)
     check("交互 shell 往返", t_shell)
 
