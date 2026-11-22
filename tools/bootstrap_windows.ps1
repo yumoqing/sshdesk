@@ -30,18 +30,23 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
 }
 
 # ---- Python 3.12（PySide6 6.6+ 支持到 3.12 最稳） ----
-$py = $null
-foreach ($cand in @("py -3.12", "python")) {
-    $exe, $pre = $cand.Split(" ")
-    if (Get-Command $exe -ErrorAction SilentlyContinue) {
-        $ver = & $exe $pre -c "import sys;print('%d.%d'%sys.version_info[:2])" 2>$null
-        if ($ver -match "^3\.(9|1[0-3])$") { $py = $cand; break }
+$pyExe = $null
+$ver = ""
+foreach ($c in @(@("py", "-3.12"), @("python"))) {
+    $exe = $c[0]
+    $preArgs = @()
+    if ($c.Count -gt 1) { $preArgs = @($c[1]) }
+    if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) { continue }
+    $ver = & $exe @preArgs -c "import sys;print('%d.%d'%sys.version_info[:2])" 2>$null
+    if ($ver -match "^3\.(9|1[0-3])$") {
+        $pyExe = (& $exe @preArgs -c "import sys;print(sys.executable)").Trim()
+        break
     }
 }
-if (-not $py) {
+if (-not $pyExe) {
     throw "缺 Python 3.9+（建议 3.12）：winget install Python.Python.3.12 装完重开 PowerShell"
 }
-Step "Python: $py ($ver)"
+Step "Python: $pyExe ($ver)"
 
 # ---- 仓库 ----
 New-Item -ItemType Directory -Force -Path $Root | Out-Null
@@ -65,15 +70,14 @@ $vpy = Join-Path $venv "Scripts\python.exe"
 
 if (-not (Test-Path $vpy)) {
     Step "建 venv: $venv"
-    $parts = $py.Split(" ")
-    & $parts[0] $parts[1..($parts.Length - 1)] -m venv $venv
+    & $pyExe -m venv $venv
     if ($LASTEXITCODE -ne 0) { throw "建 venv 失败" }
 }
 
 Step "装依赖（index: $IndexUrl）"
 & $vpy -m pip install --upgrade pip -i $IndexUrl
 & $vpy -m pip install -i $IndexUrl "PySide6-Essentials>=6.6" "paramiko>=3.4" "pyte>=0.8" wcwidth asyncssh jinja2 pyinstaller
-& $vpy -m pip install -i $IndexUrl -e (Join-Path $Root "pylice") -e (Join-Path $Root "appPublic")
+& $vpy -m pip install -i $IndexUrl -e (Join-Path $Root "pylice") -e (Join-Path $Root "appPublic") -e (Join-Path $Root "bricks-qt")
 & $vpy -m pip install -i $IndexUrl -e $sshdesk --no-deps
 if ($LASTEXITCODE -ne 0) { throw "装依赖失败" }
 
