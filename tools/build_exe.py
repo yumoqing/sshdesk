@@ -1,11 +1,15 @@
 """用 PyInstaller 打包 sshdesk：Windows exe / macOS .app / Linux 可执行目录。
 
 用法：
-    python tools/build_exe.py [--onedir|--onefile] [--console]
+    python tools/build_exe.py [--onedir|--onefile] [--console] [--universal2]
 
 产物：
     Windows  dist/sshdesk/sshdesk.exe（onedir）或 dist/sshdesk.exe（onefile）
     macOS    dist/sshdesk.app（--windowed 时 PyInstaller 自动成 bundle）
+    macOS    dist-universal/sshdesk.app（加 --universal2：Intel + Apple Silicon 通用。
+             注意：2026-11 实测还走不通 —— PyNaCl→cffi 2.1.1 没有 universal2 轮子，
+             `--target-arch universal2` 会报 IncompatibleBinaryArchError；要通用包得先自己
+             把 cffi 编成 fat。当前可行做法是出两个独立架构包（见下）。）
     Linux    dist/sshdesk/sshdesk
 
 输出目录可用环境变量 SSHDESK_DISTPATH / SSHDESK_WORKPATH 改：`dist\\sshdesk` 里的 exe
@@ -30,10 +34,20 @@ SEP = ";" if sys.platform.startswith("win") else ":"          # PyInstaller 的 
 def main() -> int:
     onefile = "--onefile" in sys.argv
     console = "--console" in sys.argv
+    # macOS 专用：出 Intel(x86_64) + Apple Silicon(arm64) 通用包。
+    # 前提是解释器与所有带二进制的依赖都是 universal2（pip 在 arm64 上默认装 arm64-only
+    # wheel，要显式 `pip download --platform macosx_11_0_universal2` 换掉，例如
+    # cryptography / bcrypt / MarkupSafe）；有一处是瘦的就让 PyInstaller 报错，别静默降级。
+    universal2 = "--universal2" in sys.argv
+    if universal2 and sys.platform != "darwin":
+        print("--universal2 只适用于 macOS")
+        return 2
     mode = "--onefile" if onefile else "--onedir"
     entry = os.path.join(ROOT, "tools", "entry.py")
-    distpath = os.environ.get("SSHDESK_DISTPATH") or os.path.join(ROOT, "dist")
-    workpath = os.environ.get("SSHDESK_WORKPATH") or os.path.join(ROOT, "build")
+    distpath = (os.environ.get("SSHDESK_DISTPATH")
+                or os.path.join(ROOT, "dist-universal" if universal2 else "dist"))
+    workpath = (os.environ.get("SSHDESK_WORKPATH")
+                or os.path.join(ROOT, "build-universal" if universal2 else "build"))
 
     args = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
             "--name", "sshdesk", mode,
@@ -58,6 +72,12 @@ def main() -> int:
 
     if sys.platform == "darwin":
         args += ["--osx-bundle-identifier", "cn.kymoz.sshdesk"]
+        if universal2:
+            args += ["--target-arch", "universal2"]
+            # Pillow 没有 universal2 轮子（PyPI 只有 arm64/x86_64 瘦包），而 PIL 是被
+            # `--collect-submodules appPublic` 顺进来的（appPublic/qr.py 用，sshdesk 不用）。
+            # 不排除就会 IncompatibleBinaryArchError: PIL/_avif... is not a fat binary。
+            args += ["--exclude-module", "PIL"]
         icon = os.path.join(ROOT, "assets", "sshdesk.icns")
         if os.path.isfile(icon):
             args += ["--icon", icon]
