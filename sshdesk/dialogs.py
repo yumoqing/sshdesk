@@ -129,6 +129,21 @@ class HostDialog(QDialog):
         self.font_size.setRange(6, 40)
         self.font_size.setValue(p.font_size or 11)
         term.addRow("字号", self.font_size)
+
+        # 保活：默认 60s 发一次；连续无响应上限 0 = 永不超时（治"空闲几分钟自动断开"）
+        self.keepalive = QSpinBox()
+        self.keepalive.setRange(0, 3600)
+        self.keepalive.setSingleStep(10)
+        self.keepalive.setValue(getattr(p, "keepalive", 60))
+        self.keepalive.setSuffix(" 秒")
+        self.keepalive.setSpecialValueText("关闭保活")
+        term.addRow("保活间隔", self.keepalive)
+        self.keepalive_max = QSpinBox()
+        self.keepalive_max.setRange(0, 100000)
+        self.keepalive_max.setValue(getattr(p, "keepalive_max", 0))
+        self.keepalive_max.setSpecialValueText("永不超时（不自动断开）")
+        self.keepalive_max.setSuffix(" 次无响应")
+        term.addRow("保活上限", self.keepalive_max)
         lay.addLayout(term)
 
         self.status = QLabel("")
@@ -171,7 +186,9 @@ class HostDialog(QDialog):
             password=self.password.text() if self.auth.currentIndex() == 1 else "",
             remember_password=self.remember.isChecked(),
             hostkey="auto" if self.hostkey.currentIndex() == 0 else "strict",
-            font_size=self.font_size.value())
+            font_size=self.font_size.value(),
+            keepalive=self.keepalive.value(),
+            keepalive_max=self.keepalive_max.value())
         if self.jump_box.isChecked():
             p.jump_host = self.jump_host.text().strip()
             p.jump_port = self.jump_port.value()

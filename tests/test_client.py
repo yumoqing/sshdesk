@@ -592,6 +592,40 @@ def main() -> int:
 
     check("真实按键路由", t_keyroute)
 
+    def t_keepalive():
+        """保活参数按会话生效：keepalive_max=0 必须是"永不因保活失败断开"。
+
+        appPublic.SSHNode 建连时写死 60s/3 次，某些服务器不回应 keepalive 请求，
+        表现就是空闲几分钟自己掉线。这里验证 SSHdesk 建连后确实覆盖了这两个值。
+        """
+        never = 1 << 30
+
+        def applied(prof):
+            s = SSHSession(prof).connect()
+            try:
+                c = s.node.conn
+                assert hasattr(c, "update_keepalive_options"), "asyncssh 版本太老"
+                return c._keepalive_interval, c._keepalive_count_max, s.keepalive_note
+            finally:
+                s.close()
+
+        iv, cnt, note = applied(HostProfile(auth="key", key_path=key_path,
+                                            keepalive=90, keepalive_max=0, **base))
+        assert iv == 90, "保活间隔没生效：%s" % iv
+        assert cnt >= never, "keepalive_max=0 应等于永不超时，实际 %s" % cnt
+        assert "永不超时" in note, note
+
+        iv, cnt, note = applied(HostProfile(auth="key", key_path=key_path,
+                                            keepalive=45, keepalive_max=7, **base))
+        assert (iv, cnt) == (45, 7), "自定义保活没生效：%s/%s" % (iv, cnt)
+
+        iv, cnt, note = applied(HostProfile(auth="key", key_path=key_path,
+                                            keepalive=0, keepalive_max=0, **base))
+        assert iv == 0, "关闭保活没生效：%s" % iv
+        assert "关闭" in note, note
+
+    check("保活可配 + 永不超时", t_keepalive)
+
     check("多标签 + 字体缩放 + 文件面板", t_gui)
 
     # ---------- 收尾 ----------

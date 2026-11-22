@@ -145,9 +145,11 @@ class SessionPage:
             self.files.attach(self.session)
             self.show_files(False)
             note = getattr(self.session, "route_note", "")
-            return "已连接 %s（%s）%s" % (self.profile.display(),
-                                        getattr(self.session, "host_key_status", ""),
-                                        " · " + note if note else "")
+            ka = getattr(self.session, "keepalive_note", "")
+            return "已连接 %s（%s）%s%s" % (self.profile.display(),
+                                          getattr(self.session, "host_key_status", ""),
+                                          " · " + note if note else "",
+                                          " · " + ka if ka else "")
         finally:
             QGuiApplication.restoreOverrideCursor()
 

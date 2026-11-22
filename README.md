@@ -40,6 +40,20 @@ python -m pip install -e D:\work\repos\appPublic   :: 或者把仓库根加进 P
 
 ## 打包成 exe
 
+**必须在 Windows 上打包**：PyInstaller 不能交叉编译，Linux 上跑不出 .exe。
+
+在一台干净的 Windows 机器上（例如局域网里的 192.168.1.161），一条命令备齐环境并出包：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\bootstrap_windows.ps1
+```
+
+脚本做的事：查 Python 3.12 / git → clone 或更新 `sshdesk` `appPublic` `bricks-qt` `pylice`
+（默认放 `%USERPROFILE%\work\repos`）→ 建 venv（`%USERPROFILE%\work\repos\.venvs\sshdesk-build`）
+→ 装依赖 → 跑 `build_exe.py --onedir` → 打印产物和机器码命令。
+
+手动等价操作：
+
 ```bat
 python tools/build_exe.py --onedir            :: 产物 dist\sshdesk\sshdesk.exe（推荐，双击即用）
 python tools/build_exe.py --onefile --console :: 单文件（启动慢些，便于分发）
@@ -51,7 +65,23 @@ onedir 实测 **124 MB**（PySide6 占大头），包含 PySide6/asyncssh/parami
 ```bat
 dist\sshdesk\sshdesk.exe --selftest     :: 起窗口 1.2 秒后自动退出，rc=0 即正常
 dist\sshdesk\sshdesk.exe --list         :: 列已保存会话
+dist\sshdesk\sshdesk.exe --license      :: 打授权机器码（要 --console 版才看得到输出）
 ```
+
+## 空闲几分钟就自动断开？（保活 / keepalive）
+
+sshdesk 建连后会定期发 `keepalive@openssh.com` 试探链路。旧版写死"60 秒一次、连续 3 次没回应
+就断开"——有些服务器/中转（尤其不回应全局请求的 sshd）不会回这个包，于是空闲约 4 分钟就掉线。
+
+现在每个会话都可配（会话设置 → 终端）：
+
+| 设置 | 默认 | 说明 |
+| --- | --- | --- |
+| 保活间隔 | 60 秒 | 空闲多久发一次保活；设 0 = 完全不发 |
+| 保活上限 | **永不超时** | 连续多少次没回应才断开；0 = 永不主动断开（只维持心跳） |
+
+默认已经是"永不超时"，只有在真的想让客户端探测死链路时才调成具体次数（比如 6 次 × 60 秒 = 6 分钟）。
+老配置里没有这两个字段时，按上面的默认值走（永远不断）。
 
 ## 会话保存在哪
 

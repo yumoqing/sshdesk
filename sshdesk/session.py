@@ -205,6 +205,8 @@ class SSHSession:
         self.via_jump: bool = False
         #: 给界面看的一句话：跳没跳、为什么（空 = 没配跳板机）
         self.route_note: str = ""
+        #: 给界面看的一句话：保活怎么配的（空 = 还没连）
+        self.keepalive_note: str = ""
 
     # ---------- 连接 ----------
     def _open(self, jumpers: List[dict]) -> None:
@@ -221,6 +223,39 @@ class SSHSession:
         with contextlib.redirect_stdout(io.StringIO()):
             self.node = SSHNode(**kw)
         self.loop.run(self.node.connect(), timeout=30)
+        self._apply_keepalive()
+
+    #: keepalive_max=0（永不超时）时内部用的次数上限：间隔 60s 也要跑几十年才用完
+    KEEPALIVE_NEVER = 1 << 30
+
+    def _apply_keepalive(self) -> None:
+        """按会话设置保活参数（覆盖 appPublic.SSHNode 里硬编码的 60s / 3 次）。
+
+        appPublic 建连时写死 ``keepalive_interval=60``，``keepalive_count_max`` 用 asyncssh
+        默认的 3：只要对端连续 3 次不回应 keepalive（约 4 分钟），客户端就主动断开——这就是
+        "目标机空闲几分钟自己掉线"的来源。这里改成按 HostProfile 的可配置值，0 = 永不超时。
+        """
+        p = self.profile
+        interval = max(0, int(getattr(p, "keepalive", 60)))
+        maxmiss = int(getattr(p, "keepalive_max", 0))
+        count = self.KEEPALIVE_NEVER if maxmiss <= 0 else maxmiss
+        conns = [getattr(self.node, "conn", None)]
+        conns += list(getattr(self.node, "jumper_conns", None) or [])
+        for conn in conns:
+            if conn is None or not hasattr(conn, "update_keepalive_options"):
+                continue
+
+            async def _apply(c=conn):
+                c.update_keepalive_options(interval, count)
+
+            try:
+                # 必须在这个 conn 自己的 asyncio 循环里改（内部会重排 timer）
+                self.loop.run(_apply(), timeout=10)
+            except Exception:                     # noqa: BLE001
+                pass
+        self.keepalive_note = ("保活 %ds / %s" %
+                              (interval, "永不超时" if maxmiss <= 0 else "%d 次" % count)
+                              if interval else "保活关闭")
 
     def connect(self) -> "SSHSession":
         p = self.profile

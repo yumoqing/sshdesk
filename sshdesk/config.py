@@ -62,6 +62,12 @@ class HostProfile:
     # 终端
     font_size: int = 11
     font_family: str = ""                  # 空 = 按平台取（Windows Consolas / macOS Menlo / Linux DejaVu）
+    # 保活：空闲多少秒发一次 keepalive@openssh.com（0 = 不发保活）
+    keepalive: int = 60
+    # 连续多少次没得到保活响应就断开（0 = 永不因保活超时断开）
+    # 有些服务器/中转不回应 keepalive 请求，默认 3 次×60s ≈ 4 分钟就"自动断开"，
+    # 想彻底不断就把这里设 0。
+    keepalive_max: int = 0
     # 主机密钥策略：auto=首连信任并记录(TOFU)；strict=必须与 known_hosts 一致
     hostkey: str = "auto"
     auto_add_key: bool = True
