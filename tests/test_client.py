@@ -604,7 +604,9 @@ def main() -> int:
             s = SSHSession(prof).connect()
             try:
                 c = s.node.conn
-                assert hasattr(c, "update_keepalive_options"), "asyncssh 版本太老"
+                assert (hasattr(c, "update_keepalive_options")
+                        or hasattr(c, "set_keepalive")), \
+                    "asyncssh 版本太老（无 update_keepalive_options / set_keepalive）"
                 return c._keepalive_interval, c._keepalive_count_max, s.keepalive_note
             finally:
                 s.close()

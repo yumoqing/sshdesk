@@ -191,6 +191,23 @@ def _probe_direct(host: str, port: int, timeout: float = DIRECT_PROBE_TIMEOUT) -
     return bool(box.get("ok"))
 
 
+def _keepalive_setter(conn):
+    """取该 asyncssh 版本上设置保活参数的入口，认不出来返回 None。
+
+    asyncssh 2.24 起把 ``update_keepalive_options(interval, count_max)`` 改名成
+    ``set_keepalive(interval, count_max)``（两者都直接写 ``_keepalive_*`` 并重排 timer）。
+    只认一个名字的话，换了 asyncssh 版本的机器上这段会静默跳过 —— 表现就是"空闲几分钟
+    自己掉线"的老毛病在打包机 / 用户机上复发。
+    """
+    if conn is None:
+        return None
+    for name in ("set_keepalive", "update_keepalive_options"):
+        fn = getattr(conn, name, None)
+        if callable(fn):
+            return fn
+    return None
+
+
 class SSHSession:
     def __init__(self, profile: HostProfile):
         self.profile = profile
@@ -242,11 +259,12 @@ class SSHSession:
         conns = [getattr(self.node, "conn", None)]
         conns += list(getattr(self.node, "jumper_conns", None) or [])
         for conn in conns:
-            if conn is None or not hasattr(conn, "update_keepalive_options"):
+            setter = _keepalive_setter(conn)
+            if setter is None:
                 continue
 
-            async def _apply(c=conn):
-                c.update_keepalive_options(interval, count)
+            async def _apply(f=setter):
+                f(interval, count)
 
             try:
                 # 必须在这个 conn 自己的 asyncio 循环里改（内部会重排 timer）
