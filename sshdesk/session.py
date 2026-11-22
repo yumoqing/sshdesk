@@ -113,10 +113,14 @@ class ShellChannel:
 
     # ---- 终端控件接口 ----
     def recv(self, n: int = 65536) -> bytes:
-        try:
-            return self._q.get(timeout=600)
-        except queue.Empty:
-            return b""
+        """阻塞等下一块输出；**只有通道真的结束才返回 b""**。
+
+        以前这里是 ``self._q.get(timeout=600)``，超时也返回 b""。上游 Terminal 把
+        「空数据」当作 EOF，于是**终端空闲 10 分钟就自己宣布「连接已断开」**——
+        其实 SSH 连接和 shell 都活着，敲键还能用（用户报的「断链但终端还能用」）。
+        现在改成一直等到有数据或 ``close()`` 放进来的结束标记。
+        """
+        return self._q.get()
 
     def sendall(self, data: bytes) -> None:
         async def _w():
@@ -149,6 +153,11 @@ class ShellChannel:
     def close(self) -> None:
         try:
             self.proc.close()
+        except Exception:                         # noqa: BLE001
+            pass
+        # 唤醒可能正阻塞在 recv() 的读线程：不给结束标记它就一直挂着（daemon 线程，不致命但白占）
+        try:
+            self._q.put(b"")
         except Exception:                         # noqa: BLE001
             pass
 

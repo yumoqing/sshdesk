@@ -554,6 +554,106 @@ def main() -> int:
 
     check("掉线提示", t_disconnect)
 
+    # ---------- 空闲不得误判断链：recv() 只有真 EOF 才许返回空 ----------
+    def t_idle_no_false_eof():
+        import queue as _q
+        from sshdesk.session import ShellChannel
+
+        class _Q:
+            """没有数据时**必须**让调用方一直等；带 timeout 就让上层拿到空串 = 误判断线。"""
+
+            def get(self, *a, **kw):
+                if kw:
+                    raise _q.Empty
+                raise RuntimeError("blocked-forever")
+
+        ch = object.__new__(ShellChannel)
+        ch._q = _Q()
+        try:
+            got = ch.recv(10)
+        except RuntimeError as e:
+            assert "blocked-forever" in str(e), e
+        else:
+            raise AssertionError(
+                "recv() 空闲就返回了 %r —— 上层把它当 EOF，会误报「连接已断开」（老 bug：get(timeout=600)）" % (got,))
+
+    check("空闲不误判断链", t_idle_no_false_eof)
+
+    # ---------- 拖一整个目录进去：文件要落地，且终端通道不许被判掉线 ----------
+    def t_drop_dir_alive():
+        from PySide6.QtCore import QMimeData, QSize, QUrl, Qt
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication(sys.argv[:1])
+        sess = SSHSession(key_prof).connect()
+        from sshdesk.term import TerminalView
+        from sshdesk.files import FileBrowser
+        tv = TerminalView(font_family="Consolas", font_size=12)
+        tv.resize(QSize(700, 300))
+        tv.setAttribute(Qt.WA_DontShowOnScreen, True)
+        tv.show()
+        tv._refresh_metrics()
+        chan = sess.open_shell(tv._screen.columns, tv._screen.lines)
+        tv.attach_channel(chan)
+        dead = []
+        tv.connected_changed.connect(lambda ok: dead.append(ok))
+        fb = FileBrowser(sess)
+        fb.resize(QSize(700, 500))
+        fb.chdir("/")
+        app.processEvents()
+
+        src = os.path.join(tmp, "拖入目录")
+        os.makedirs(os.path.join(src, "sub", "deep"), exist_ok=True)
+        for rel in ("a.txt", os.path.join("sub", "b.txt"), os.path.join("sub", "deep", "c.bin")):
+            p = os.path.join(src, rel)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "wb") as fh:
+                fh.write(b"x" * 1024)
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(src)])
+
+        class _Ev:
+            def __init__(self, m):
+                self._m = m
+
+            def mimeData(self):
+                return self._m
+
+            def setDropAction(self, a):
+                pass
+
+            def accept(self):
+                pass
+
+        fb.table.dropEvent(_Ev(mime))
+        want = {"a.txt", "b.txt", "c.bin"}
+        deadline = time.time() + 25
+        got = set()
+        while time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.05)
+            try:
+                got = {n for n in (r[0] for r in sess.listdir("/拖入目录/sub/deep"))}
+                got |= {r[0] for r in sess.listdir("/拖入目录")}
+                got |= {r[0] for r in sess.listdir("/拖入目录/sub")}
+            except Exception:                            # noqa: BLE001
+                got = set()
+            if want <= got:
+                break
+        assert want <= got, "目录没完整上传：%r" % (sorted(got),)
+        assert not [d for d in dead if d is False], "拖目录后终端被判掉线：%r" % (dead,)
+        sess.remove("/拖入目录/sub/deep/c.bin")
+        sess.remove("/拖入目录/sub/b.txt")
+        sess.remove("/拖入目录/a.txt")
+        sess.rmdir("/拖入目录/sub/deep")
+        sess.rmdir("/拖入目录/sub")
+        sess.rmdir("/拖入目录")
+        tv.detach()
+        sess.close()
+        drop_widget(fb)
+        drop_widget(tv)
+
+    check("拖目录上传不断线", t_drop_dir_alive)
+
     # ---------- 真实按键路由：焦点在终端上、键真的走事件链送到远端 ----------
     def t_keyroute():
         from PySide6.QtCore import Qt
