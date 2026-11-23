@@ -182,6 +182,21 @@ def main() -> int:
         assert sha256(got[0]) == sha256(full), "拖出下载没续传/内容不一致"
         os.remove(staged)
 
+        # 目录拖出同样按断点：临时目录里先放半截，再拖整个目录
+        sess.mkdir("/dirdrag")
+        sess.upload(full, "/dirdrag/big.bin")
+        staged_dir = os.path.join(drag_dir, "dirdrag")
+        os.makedirs(staged_dir, exist_ok=True)
+        with open(os.path.join(staged_dir, "big.bin"), "wb") as fh:
+            fh.write(data[:1024 * 1024])
+        got_dir = fb._fetch_to_temp(["dirdrag"])
+        assert got_dir and os.path.isdir(got_dir[0]), "拖出目录失败：%r" % got_dir
+        assert sha256(os.path.join(got_dir[0], "big.bin")) == sha256(full), \
+            "目录里的文件没接着续传"
+        sess.remove("/dirdrag/big.bin")
+        sess.rmdir("/dirdrag")
+        shutil.rmtree(staged_dir, ignore_errors=True)
+
         sess.remove("/panel.bin")
         sess.close()
         fb.deleteLater()

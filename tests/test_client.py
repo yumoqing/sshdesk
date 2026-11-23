@@ -490,6 +490,66 @@ def main() -> int:
 
     check("拖拽上传 / 拖出下载", t_drop_upload)
 
+    # ---------- 拖出目录：递归下载整棵树（含空目录），再拖一次走跳过 ----------
+    def t_drop_dir_out():
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication(sys.argv[:1])
+        sess = SSHSession(key_prof).connect()
+        from sshdesk.files import FileBrowser
+        fb = FileBrowser(sess)
+        fb.chdir("/")
+        app.processEvents()
+
+        # 远端造树：a.txt / sub/b.txt / sub/deep/c.bin / empty（空目录）
+        src = os.path.join(tmp, "拖出目录")
+        os.makedirs(os.path.join(src, "sub", "deep"), exist_ok=True)
+        os.makedirs(os.path.join(src, "empty"), exist_ok=True)
+        payload = {"a.txt": b"A",
+                   os.path.join("sub", "b.txt"): b"BB",
+                   os.path.join("sub", "deep", "c.bin"): b"C" * 4096}
+        for rel, data in payload.items():
+            with open(os.path.join(src, rel), "wb") as fh:
+                fh.write(data)
+        fb.upload_paths([src])
+        th = fb._th
+        deadline = time.time() + 60
+        while th.is_running() and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.02)
+        th.wait(10)
+        names = [r[0] for r in sess.listdir("/")]
+        assert "拖出目录" in names, "目录没传上去：%r" % names
+        assert "empty" in [r[0] for r in sess.listdir("/拖出目录")], \
+            "上传时把空目录丢了：%r" % [r[0] for r in sess.listdir("/拖出目录")]
+
+        root = os.path.join(tempfile.gettempdir(), "sshdesk_drag", "拖出目录")
+        shutil.rmtree(root, ignore_errors=True)         # 别让上一轮的残留冒充结果
+        got = fb._fetch_to_temp(["拖出目录"])
+        assert got and os.path.isdir(got[0]), "拖出目录返回的不是文件夹：%r" % got
+        root = got[0]
+        for rel, data in payload.items():
+            p = os.path.join(root, rel)
+            assert os.path.isfile(p), "拖出目录少了文件：%s" % rel
+            assert open(p, "rb").read() == data, "拖出文件内容不对：%s" % rel
+        assert os.path.isdir(os.path.join(root, "empty")), "空目录没建出来"
+
+        # 同一个目录再拖一次：本地已完整 → 全部跳过，还是同一个文件夹
+        got2 = fb._fetch_to_temp(["拖出目录"])
+        assert got2 == got, "第二次拖出路径变了：%r vs %r" % (got2, got)
+        assert open(os.path.join(root, "sub", "deep", "c.bin"), "rb").read() == \
+            payload[os.path.join("sub", "deep", "c.bin")], "第二次拖出把文件弄坏了"
+
+        sess.remove("/拖出目录/sub/deep/c.bin")
+        sess.remove("/拖出目录/sub/b.txt")
+        sess.remove("/拖出目录/a.txt")
+        for d in ("/拖出目录/sub/deep", "/拖出目录/sub", "/拖出目录/empty", "/拖出目录"):
+            sess.rmdir(d)
+        sess.close()
+        shutil.rmtree(root, ignore_errors=True)
+        drop_widget(fb)
+
+    check("拖出目录递归下载", t_drop_dir_out)
+
     # ---------- 中文输入（走输入法提交）----------
     def t_ime():
         from PySide6.QtCore import QSize, Qt
