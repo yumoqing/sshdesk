@@ -8,9 +8,16 @@ from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional
 
 
+def on_android() -> bool:
+    """是否跑在 python-for-android 打的包里（ANDROID_PRIVATE = 应用私有可写目录）。"""
+    return bool(os.environ.get("ANDROID_PRIVATE") or os.environ.get("ANDROID_ARGUMENT"))
+
+
 def default_mono_font() -> str:
     """各平台默认等宽字体（Consolas 只有 Windows 有）。"""
     import sys
+    if on_android():
+        return "Droid Sans Mono"
     if sys.platform == "darwin":
         return "Menlo"
     if sys.platform.startswith("win"):
@@ -24,7 +31,9 @@ def config_dir() -> str:
         os.makedirs(override, exist_ok=True)
         return override
     import sys
-    if sys.platform == "darwin":                      # ~/Library/Application Support/sshdesk
+    if on_android():                                  # /data/user/0/<pkg>/files/sshdesk
+        base = os.environ.get("ANDROID_PRIVATE") or os.path.expanduser("~")
+    elif sys.platform == "darwin":                    # ~/Library/Application Support/sshdesk
         base = os.path.expanduser("~/Library/Application Support")
     else:
         base = os.environ.get("APPDATA") or os.path.expanduser("~/.config")

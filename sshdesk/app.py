@@ -314,8 +314,11 @@ class MainWindow(BricksWindow):
         self.addDockWidget(Qt.LeftDockWidgetArea, dock)
         self.dock = dock
         self.resizeDocks([dock], [280], Qt.Horizontal)
+        # 窄屏（iPhone）：会话列表默认收起，工具栏「会话」按钮随时拉出，把宽度全让给终端
+        QTimer.singleShot(0, self._adapt_narrow)
         # 工具栏横跨整窗、状态条落到窗口底部；否则 dock 会顶到最左边，把工具栏挤到右边去
         bar = ctx.refs.get("toolbar")
+        self._bar = bar
         if bar is not None:
             self.setMenuWidget(bar)
         sb = QStatusBar()
@@ -329,6 +332,22 @@ class MainWindow(BricksWindow):
 
     def toggle_sessions(self) -> None:
         self.dock.setVisible(not self.dock.isVisible())
+
+    def _adapt_narrow(self) -> None:
+        """窄屏把侧边会话栏收起：iPhone 上左右并排会把终端挤没。"""
+        if self.width() >= 700:
+            return
+        if self.dock.isVisible():
+            self.dock.hide()
+        # 工具栏同样放不下：先砍掉字号调节/管理/重连这些次要按钮，保住首屏可用
+        bar = getattr(self, "_bar", None)
+        if bar is None:
+            return
+        drop = ("管理", "重连", "A-", "A+", "复位")
+        for w in bar.findChildren(QWidget):
+            txt = w.text() if hasattr(w, "text") else ""
+            if txt and (txt in drop or txt.startswith("字号")):
+                w.hide()
 
     # ---------------- 会话列表 ----------------
     def fill_sessions(self, keyword: str = "") -> None:

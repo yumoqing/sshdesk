@@ -14,11 +14,13 @@ import asyncio
 import contextlib
 import io
 import os
+import posixpath
 import queue
 import threading
 from typing import Callable, List, Optional, Tuple
 
 from .config import HostProfile, known_hosts_path
+from .diag import log
 
 def _import_sshx():
     """优先用已安装/已在 PYTHONPATH 的 appPublic；找不到就试几个常见仓库位置。"""
@@ -43,7 +45,15 @@ def _import_sshx():
     raise ImportError("需要 appPublic 模块（sshx）：把仓库根加进 PYTHONPATH 或设置 SSHDESK_APPPUBLIC")
 
 
-SSHNode = _import_sshx()
+def _ssh_node_cls():
+    """按需取 SSHNode：iOS 上没有 cryptography 时也能把 UI 跑起来，连不上再报错。"""
+    return _import_sshx()
+
+
+def __getattr__(name):
+    if name == "SSHNode":
+        return _ssh_node_cls()
+    raise AttributeError(name)
 
 
 class SSHError(Exception):
@@ -54,13 +64,54 @@ class TransferCancelled(SSHError):
     """用户取消传输。已经写下去的部分保留，下次同一个目标会从断点继续。"""
 
 
-#: SFTP 块大小与流水线深度。大文件全靠 pipelining（同时挂 16 个 WRITE/READ 在途）才跑得满带宽；
-#: 块太小（32K 默认）在高延迟链路上会退化成一问一答。
-SFTP_CHUNK = 256 * 1024
+#: SFTP 块大小与流水线深度。大文件全靠 pipelining（同时挂 16 个 WRITE/READ 在途）才跑得满带宽。
+#:
+#: 块大小**不能**给到 256K：OpenSSH sftp-server 对「一条 SFTP 消息」的硬上限是 256KB
+#: （SFTP_MAX_MSG_LENGTH），而 WRITE 报文还要额外带 4 字节长度 + 13 字节头部。发 256K 的块
+#: 正好越过这条线，服务器**不返回错误、直接关掉 SFTP 通道**，于是上传大文件时断链，之后
+#: 远端目录一直显示 "Connection not open"（SSH 连接本身还活着，终端照用）——v0.1.0 的
+#: 头号 bug。128K 留足余量，各家的 sftp-server 都吃得下；实际用时还会再按服务器在
+#: limits@openssh.com 里公布的最大读写长度收紧一次（见 SSHSession._chunk）。
+SFTP_CHUNK = 128 * 1024
 SFTP_MAX_REQUESTS = 16
 #: 单块读写的等待上限。传输本身不设总超时（大文件本来就慢，180s 一定不够），
 #: 只判断"卡住了"：单块超过这个时间没有任何进展才算链路断开。
 SFTP_STALL = 120.0
+
+#: SFTP **会话**被服务器关掉时 asyncssh 的报错原文。命中这些就丢掉旧会话重开一条重试：
+#: 这类错误是持久的（旧会话再也用不了），不重开的话整个文件面板会一直"Connection not open"。
+_SFTP_DEAD = ("Connection not open", "Connection closed", "Channel closed",
+              "SFTP connection lost", "SSH connection lost")
+
+
+def _sftp_dead(exc) -> bool:
+    """这个异常是不是"SFTP 会话已经没了"（而不是单个操作失败：权限/不存在等）。"""
+    text = str(exc)
+    return any(k in text for k in _SFTP_DEAD)
+
+
+#: SSH **连接本身**断了（不只是 SFTP 通道）时的报错特征。命中就先重连，再按已落盘的字节续传。
+_CONN_DEAD = ("Connection lost", "Connection closed", "Server disconnected", "Disconnected",
+              "Broken pipe", "Connection reset", "Transport closed", "socket is closed",
+              "Not connected", "未连接", "Connection not open")
+
+
+def _conn_dead(exc) -> bool:
+    return any(k in str(exc) for k in _CONN_DEAD)
+
+
+def _transient(exc) -> bool:
+    """这个异常值不值得"重开 SFTP / 重连 + 续传"再试：链路层面的错，不是权限或文件不存在。
+
+    注意 asyncssh 自己的异常（asyncssh.ConnectionLost / SFTPFailure / ChannelOpenError…）
+    **不是** SSHError 的子类——v0.1.0 的自动重连只 catch SSHError，所以大文件传到一半
+    链路一抖就是硬失败，用户看到的就是"文件一大就断连"。
+    """
+    if isinstance(exc, (TransferCancelled, KeyboardInterrupt)):
+        return False
+    if isinstance(exc, (OSError, EOFError, asyncio.TimeoutError)):
+        return True
+    return _sftp_dead(exc) or _conn_dead(exc)
 
 
 class _Loop:
@@ -224,6 +275,7 @@ class SSHSession:
         self.node = None
         self._chan: Optional[ShellChannel] = None
         self._sftp = None
+        self._sftp_lock = threading.Lock()          # 只保护"建/丢 SFTP 会话"，不包住传输
         #: 上一次传输的决策，给界面显示"续传/跳过"用
         #: {"path", "mode": "full"|"resume"|"skip", "offset", "total", "sent"}
         self.transfer_info: dict = {}
@@ -247,7 +299,7 @@ class SSHSession:
                 kw["passphrase"] = p.key_passphrase
         # SSHNode.__init__ 会 print 整个配置（含密码），这里静音，避免落到日志
         with contextlib.redirect_stdout(io.StringIO()):
-            self.node = SSHNode(**kw)
+            self.node = _ssh_node_cls()(**kw)
         self.loop.run(self.node.connect(), timeout=30)
         self._apply_keepalive()
 
@@ -430,16 +482,55 @@ class SSHSession:
 
     # ---------- 文件 ----------
     def _sftp_client(self):
-        if self._sftp is None:
-            async def _start():
-                return await self.node.conn.start_sftp_client()
-            self._sftp = self.loop.run(_start(), timeout=30)
-        return self._sftp
+        with self._sftp_lock:
+            if self._sftp is None:
+                if not (self.node and self.node.conn):
+                    raise SSHError("未连接")
+                async def _start():
+                    return await self.node.conn.start_sftp_client()
+                self._sftp = self.loop.run(_start(), timeout=30)
+            return self._sftp
+
+    def _reset_sftp(self) -> None:
+        """丢掉当前 SFTP 会话（它已经不可用了），下次用会新开一条。"""
+        with self._sftp_lock:
+            old, self._sftp = self._sftp, None
+        if old is not None:
+            try:
+                old.exit()
+            except Exception:                     # noqa: BLE001
+                pass
+
+    def _sftp_call(self, fn, timeout: Optional[float] = 30.0, retry: bool = True):
+        """在 SFTP 会话上跑一次操作。`fn(sftp)` 必须返回**新**协程（重试时会再调一次）。
+
+        服务器把 SFTP 通道关掉（块太大越界、空闲超时、sshd 重启）之后，旧会话上的所有操作
+        都只会报 "Connection not open" 而且**永远**好不了——v0.1.0 的"拖进来上传就把文件
+        面板搞死"就是这个。这里命中就丢掉旧会话、重开一条再试一次，界面不用重连。
+        """
+        sftp = self._sftp_client()
+        try:
+            return self.loop.run(fn(sftp), timeout=timeout)
+        except Exception as e:                    # noqa: BLE001  asyncssh 的异常不是 SSHError
+            if not (retry and _transient(e)):
+                raise
+            log().warning("SFTP 操作失败，重开会话再试一次：%r", e)
+            self._reset_sftp()
+            if not self.connected:
+                self._reconnect()                 # SSH 连接也没了：整条重连，别让面板变砖
+            return self.loop.run(fn(self._sftp_client()), timeout=timeout)
+
+    @staticmethod
+    def _chunk(sftp, kind: str = "write") -> int:
+        """块大小：不超过 SFTP_CHUNK，也不超过服务器公布的最大读写长度（没公布就用 SFTP_CHUNK）。"""
+        lim = getattr(sftp, "limits", None)
+        cap = int(getattr(lim, "max_%s_len" % kind, 0) or 0)
+        if cap > 0:
+            return max(4096, min(SFTP_CHUNK, cap))
+        return SFTP_CHUNK
 
     def listdir(self, path: str) -> List[Tuple[str, int, float, bool]]:
-        sftp = self._sftp_client()
-
-        async def _ls():
+        async def _ls(sftp):
             out = []
             for a in await sftp.readdir(path):
                 name = a.filename or ""
@@ -453,37 +544,105 @@ class SSHSession:
                             is_dir))
             return out
 
-        return self.loop.run(_ls(), timeout=90)
+        return self._sftp_call(_ls, timeout=90)
 
     def realpath(self, path: str = ".") -> str:
         try:
-            return self.loop.run(self._sftp_client().realpath(path), timeout=20) or "/"
+            return self._sftp_call(lambda s: s.realpath(path), timeout=20) or "/"
         except Exception:                         # noqa: BLE001
             return "/"
 
     def stat_size(self, path: str) -> int:
-        a = self.loop.run(self._sftp_client().stat(path), timeout=30)
+        a = self._sftp_call(lambda s: s.stat(path), timeout=30)
         return int(a.size or 0)
 
     def is_dir(self, path: str) -> bool:
         try:
-            a = self.loop.run(self._sftp_client().stat(path), timeout=30)
+            a = self._sftp_call(lambda s: s.stat(path), timeout=30)
             return bool(a.permissions is not None and (a.permissions & 0o040000) == 0o040000)
         except Exception:                         # noqa: BLE001
             return False
 
     def mkdir(self, path: str) -> None:
-        self.loop.run(self._sftp_client().mkdir(path), timeout=30)
+        self._sftp_call(lambda s: s.mkdir(path), timeout=30)
 
     def rmdir(self, path: str) -> None:
-        self.loop.run(self._sftp_client().rmdir(path), timeout=30)
+        self._sftp_call(lambda s: s.rmdir(path), timeout=30)
 
     def remove(self, path: str) -> None:
-        self.loop.run(self._sftp_client().remove(path), timeout=30)
+        self._sftp_call(lambda s: s.remove(path), timeout=30)
+
+    def remove_tree(self, path: str) -> int:
+        """递归删除远端目录（SFTP 的 rmdir 只删空目录），返回删掉的文件数。
+
+        「删除」按钮点一个非空文件夹时旧版直接抛 Failure——用户看到的就是"删除失败"。
+        符号链接按文件删（不跟进去，免得删到链接目标）。
+        """
+        async def _walk(sftp, d: str) -> int:
+            n = 0
+            for a in await sftp.readdir(d):
+                name = a.filename or ""
+                if name in (".", ".."):
+                    continue
+                child = posixpath.join(d, name)
+                perms = a.attrs.permissions if a.attrs else None
+                if perms is not None and (perms & 0o170000) == 0o040000:
+                    n += await _walk(sftp, child)
+                    await sftp.rmdir(child)
+                else:
+                    try:
+                        await sftp.remove(child)
+                        n += 1
+                    except Exception:                 # noqa: BLE001
+                        # 服务端没在 listing 里报类型（perms=None）：其实是个子目录 → 递归进去
+                        n += await _walk(sftp, child)
+                        await sftp.rmdir(child)
+            return n
+
+        async def _rm(sftp):
+            n = await _walk(sftp, path)
+            try:
+                await sftp.rmdir(path)
+            except Exception:                         # noqa: BLE001
+                # 列目录与删目录之间又冒出新东西（别的进程正在写）→ 再扫一遍
+                n += await _walk(sftp, path)
+                await sftp.rmdir(path)
+            return n
+
+        return int(self._sftp_call(_rm, timeout=None) or 0)
+
+    def remove_path(self, path: str) -> int:
+        """删「文件或目录」都能删对：返回删掉的文件数（文件算 1）。
+
+        为什么不在调用方判断类型再分派：`stat` 不返回 permissions 的服务端（部分 NAS /
+        老 sftp-server / 某些 Windows OpenSSH）会让类型判断失手，于是目录被当成文件去
+        `remove` → 非空目录直接 Failure，用户看到的就是"删除目录当里面有东西就失败"。
+        这里先按类型走，失手就换另一种删法兜住。
+        """
+        isdir = False
+        try:
+            a = self._sftp_call(lambda s: s.stat(path), timeout=30)
+            perms = getattr(a, "permissions", None)
+            isdir = bool(perms is not None and (perms & 0o170000) == 0o040000)
+        except Exception as e:                        # noqa: BLE001  不存在/无权限等，下面按文件试
+            log().debug("remove_path: stat %s 失败：%r", path, e)
+        if isdir:
+            try:
+                return self.remove_tree(path)
+            except Exception as e:                    # noqa: BLE001
+                log().warning("remove_path: 递归删 %s 失败，改按文件删：%r", path, e)
+                self.remove(path)
+                return 1
+        try:
+            self.remove(path)
+            return 1
+        except Exception as e1:                       # noqa: BLE001
+            log().warning("remove_path: 按文件删 %s 失败，改按目录递归删：%r", path, e1)
+            return self.remove_tree(path)
 
     def stat_info(self, path: str) -> Tuple[int, float]:
         """(size, mtime)。文件不存在时抛异常。"""
-        a = self.loop.run(self._sftp_client().stat(path), timeout=30)
+        a = self._sftp_call(lambda s: s.stat(path), timeout=30)
         return int(a.size or 0), float(a.mtime or 0)
 
     def _stat_or_none(self, path: str):
@@ -517,7 +676,6 @@ class SSHSession:
         - `stop`：`threading.Event`，置位后下一块之前中止并抛 `TransferCancelled`，
           已经写下去的部分留在远端，下次同一个目标自动续传
         """
-        sftp = self._sftp_client()
         total = os.path.getsize(local)
         info = self._stat_or_none(remote) if offset is None else None
         offset, mode = self._plan(total, info[0] if info else None, offset)
@@ -528,34 +686,41 @@ class SSHSession:
                 progress(total, total)
             return 0
 
-        async def _put():
-            sent = 0
-            pos = offset
-            # 续传必须 r+b：wb 会在打开时把已传的部分截掉
-            async with sftp.open(remote, "r+b" if offset else "wb",
-                                 block_size=SFTP_CHUNK,
-                                 max_requests=SFTP_MAX_REQUESTS) as fh:
-                with open(local, "rb") as src:
-                    src.seek(offset)
-                    if progress:
-                        progress(pos, total)
-                    while True:
-                        if stop is not None and stop.is_set():
-                            raise TransferCancelled("上传已取消：%s" % remote)
-                        data = src.read(SFTP_CHUNK)
-                        if not data:
-                            break
-                        try:
-                            await asyncio.wait_for(fh.write(data, pos), SFTP_STALL)
-                        except asyncio.TimeoutError:
-                            raise SSHError("传输停滞：%d 秒没有进展（%s）" % (SFTP_STALL, remote))
-                        pos += len(data)
-                        sent += len(data)
+        def _put_from(start: int) -> int:
+            async def _put():
+                sftp = self._sftp_client()
+                chunk = self._chunk(sftp, "write")
+                sent = 0
+                pos = start
+                # 续传必须 r+b：wb 会在打开时把已传的部分截掉
+                async with sftp.open(remote, "r+b" if start else "wb",
+                                     block_size=chunk,
+                                     max_requests=SFTP_MAX_REQUESTS) as fh:
+                    with open(local, "rb") as src:
+                        src.seek(start)
                         if progress:
                             progress(pos, total)
-            return sent
+                        while True:
+                            if stop is not None and stop.is_set():
+                                raise TransferCancelled("上传已取消：%s" % remote)
+                            data = src.read(chunk)
+                            if not data:
+                                break
+                            try:
+                                await asyncio.wait_for(fh.write(data, pos), SFTP_STALL)
+                            except asyncio.TimeoutError:
+                                raise SSHError("传输停滞：%d 秒没有进展（%s）" % (SFTP_STALL, remote))
+                            pos += len(data)
+                            sent += len(data)
+                            if progress:
+                                progress(pos, total)
+                return sent
 
-        sent = self.loop.run(_put(), timeout=None)
+            return self.loop.run(_put(), timeout=None)
+
+        log().info("上传 %s → %s：%s，共 %d 字节（起点 %d）", local, remote, mode, total, offset)
+        sent = self._run_transfer(_put_from, offset, total, remote, stop,
+                                  side="up", local=local)
         self.transfer_info["sent"] = sent
         return sent
 
@@ -564,7 +729,6 @@ class SSHSession:
                  offset: Optional[int] = None,
                  stop: Optional[object] = None) -> int:
         """下载远端文件；返回本次实际传的字节数。断点/取消语义同 upload（看本地已有多大）。"""
-        sftp = self._sftp_client()
         total = self.stat_size(remote)
         have = os.path.getsize(local) if os.path.isfile(local) else None
         offset, mode = self._plan(total, have, offset)
@@ -576,33 +740,107 @@ class SSHSession:
             return 0
         os.makedirs(os.path.dirname(os.path.abspath(local)) or ".", exist_ok=True)
 
-        async def _get():
-            done = 0
-            pos = offset
-            async with sftp.open(remote, "rb",
-                                 block_size=SFTP_CHUNK,
-                                 max_requests=SFTP_MAX_REQUESTS) as fh:
-                with open(local, "r+b" if offset else "wb") as dst:
-                    dst.seek(offset)
-                    dst.truncate(offset)     # 去掉比远端多的残留尾巴
-                    if progress:
-                        progress(pos, total)
-                    while True:
-                        if stop is not None and stop.is_set():
-                            raise TransferCancelled("下载已取消：%s" % remote)
-                        try:
-                            data = await asyncio.wait_for(fh.read(SFTP_CHUNK, pos), SFTP_STALL)
-                        except asyncio.TimeoutError:
-                            raise SSHError("传输停滞：%d 秒没有进展（%s）" % (SFTP_STALL, remote))
-                        if not data:
-                            break
-                        dst.write(data)
-                        pos += len(data)
-                        done += len(data)
+        def _get_from(start: int) -> int:
+            async def _get():
+                sftp = self._sftp_client()
+                chunk = self._chunk(sftp, "read")
+                done = 0
+                pos = start
+                async with sftp.open(remote, "rb",
+                                     block_size=chunk,
+                                     max_requests=SFTP_MAX_REQUESTS) as fh:
+                    with open(local, "r+b" if start else "wb") as dst:
+                        dst.seek(start)
+                        dst.truncate(start)     # 去掉比远端多的残留尾巴
                         if progress:
                             progress(pos, total)
-            return done
+                        while True:
+                            if stop is not None and stop.is_set():
+                                raise TransferCancelled("下载已取消：%s" % remote)
+                            try:
+                                data = await asyncio.wait_for(fh.read(chunk, pos), SFTP_STALL)
+                            except asyncio.TimeoutError:
+                                raise SSHError("传输停滞：%d 秒没有进展（%s）" % (SFTP_STALL, remote))
+                            if not data:
+                                break
+                            dst.write(data)
+                            pos += len(data)
+                            done += len(data)
+                            if progress:
+                                progress(pos, total)
+                return done
 
-        sent = self.loop.run(_get(), timeout=None)
+            return self.loop.run(_get(), timeout=None)
+
+        log().info("下载 %s → %s：%s，共 %d 字节（起点 %d）", remote, local, mode, total, offset)
+        sent = self._run_transfer(_get_from, offset, total, remote, stop,
+                                  side="down", local=local)
         self.transfer_info["sent"] = sent
         return sent
+
+    def _side_size(self, side: str, remote: str, local: Optional[str]) -> int:
+        """续传的起点：上传看远端已写多少，下载看本地已落多少。"""
+        if side == "up":
+            return (self._stat_or_none(remote) or (0, 0.0))[0]
+        try:
+            return os.path.getsize(local or "")
+        except OSError:
+            return 0
+
+    def _reconnect(self) -> None:
+        """SSH 连接本身断了：就地重连一条，让文件面板接着续传。
+
+        终端页会因为底层通道消失显示断开（用户点「重连」即可恢复 shell），但传输不该
+        因为这条链断一次就整个失败——大文件传了几个 G 才发现断了，是 v0.1.0 里最气人的
+        那条反馈（"文件一大就断连"）。
+        """
+        p = self.profile
+        log().warning("SSH 连接已断（%s:%s），就地重连", p.host, p.port or 22)
+        try:
+            self.close()
+        except Exception:                             # noqa: BLE001
+            pass
+        self._reset_sftp()
+        self.connect()
+        log().info("重连成功（%s:%s）", p.host, p.port or 22)
+
+    def _run_transfer(self, run, offset: int, total: int, remote: str, stop,
+                      side: str = "up", local: Optional[str] = None) -> int:
+        """跑传输；中途链路抖了就「重开 SFTP（必要时整条重连）+ 按已传字节续传」。
+
+        最多试 TRANSFER_ATTEMPTS 次。判断能不能救：`_transient`（连接/SFTP 断开、超时、
+        EOF 这类链路错），权限失败、文件不存在这类是持久错，立刻抛出去让用户看见。
+        续传起点按方向取：上传看远端大小，下载看本地大小（反了会让下载"假装传完了"）。
+        """
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                sent = run(offset)
+                if attempt > 1:
+                    log().info("传输第 %d 次尝试成功：%s（本次 %d 字节）", attempt, remote, sent)
+                return sent
+            except Exception as e:                    # noqa: BLE001
+                if not _transient(e):
+                    raise
+                if stop is not None and getattr(stop, "is_set", None) and stop.is_set():
+                    raise
+                log().warning("传输中断（%s，第 %d/%d 次）：%r",
+                              remote, attempt, self.TRANSFER_ATTEMPTS, e)
+                if attempt >= self.TRANSFER_ATTEMPTS:
+                    raise SSHError("%s（已重试 %d 次仍失败：%s）"
+                                   % (remote, attempt, str(e)[:140])) from e
+                self._reset_sftp()
+                if not self.connected:
+                    try:
+                        self._reconnect()
+                    except Exception as e2:           # noqa: BLE001
+                        log().error("重连失败：%r", e2)
+                        raise SSHError("%s（重连失败：%s）" % (remote, str(e2)[:120])) from e
+                have = self._side_size(side, remote, local)
+                if total and have >= total:
+                    return max(0, total - offset)
+                offset = have
+
+    #: 一次传输里最多重试几次（每次都会重开 SFTP / 必要时整条重连，然后断点续传）
+    TRANSFER_ATTEMPTS = 3
