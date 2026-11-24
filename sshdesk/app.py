@@ -26,6 +26,7 @@ from bricks_qt.app import BricksWindow
 from bricks_qt.remotefiles import RemoteFiles
 from bricks_qt.terminal import Terminal
 
+from . import __version__
 from .config import AppConfig, HostProfile, default_mono_font
 from .dialogs import HostDialog, SessionManager
 from .license import License
@@ -196,7 +197,7 @@ class MainWindow(BricksWindow):
         self.cfg = cfg or AppConfig.load()
         ctx = Ctx(base_dir=UI_DIR)
         node = load_file(os.path.join(UI_DIR, "main.ui"))
-        super().__init__(node, ctx, "sshdesk — SSH / SFTP 客户端")
+        super().__init__(node, ctx, "sshdesk %s — SSH / SFTP 客户端" % __version__)
         self.ctx = ctx
         self.resize(1280, 820)
 
@@ -534,7 +535,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         win.setAttribute(Qt.WA_DontShowOnScreen, True)
         win.show()
         app.processEvents()
-        _emit("selftest ok: %d 个会话，窗口正常起来（bricks .ui）" % len(cfg.hosts))
+        _emit("selftest ok: sshdesk %s，%d 个会话，窗口正常起来（bricks .ui）"
+              % (__version__, len(cfg.hosts)))
         return 0
 
     win.show()
