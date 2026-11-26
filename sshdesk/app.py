@@ -28,7 +28,7 @@ from bricks_qt.terminal import Terminal
 
 from . import __version__
 from .config import AppConfig, HostProfile, default_mono_font
-from .dialogs import HostDialog, SessionManager
+from .dialogs import HostDialog, SessionManager, ask_delete
 from .license import License
 from .session import SSHError, SSHSession
 
@@ -434,6 +434,11 @@ class MainWindow(BricksWindow):
             return
         holder = self.tabs.widget(idx)
         page = next((p for p in self.pages_ if getattr(p, "holder", None) is holder), None)
+        # 用户点页签上的 × 属于「删除连接」：必须先弹确认，只有点「确认」才真删。
+        # drop_only=True 是内部失败清理（连接失败）与程序退出路径，不能弹框。
+        if not drop_only and not self._confirm_close(page, idx):
+            self.status_label.setText("已取消关闭")
+            return
         if page is not None:
             try:
                 page.dispose()                  # 停通道 + 断信号 + 控件交给事件循环删
@@ -447,6 +452,19 @@ class MainWindow(BricksWindow):
             QTimer.singleShot(0, self._trash.clear)
         if not drop_only:
             self.status_label.setText("已关闭会话")
+
+    def _confirm_close(self, page: Optional["SessionPage"], idx: int) -> bool:
+        """关闭/删除连接页签前的确认。只有点「确认删除」才返回 True。
+
+        取消、Esc、点窗口 X 都返回 False —— 一律不删连接。
+        """
+        name = ""
+        if page is not None:
+            name = page.profile.name or page.profile.host or ""
+        if not name:
+            name = self.tabs.tabText(idx)
+        return ask_delete(self, "删除连接",
+                          "确定删除连接「%s」？\n\n该页签会被关闭，正在进行的会话会断开。" % name)
 
     # ---------------- 动作 ----------------
     def new_session(self) -> None:

@@ -26,6 +26,24 @@ def _row(*widgets) -> QWidget:
     return w
 
 
+def ask_delete(parent, title: str, text: str) -> bool:
+    """统一的「删除」二次确认。只有点「确认删除」返回 True。
+
+    默认按钮故意停在「取消」：回车不误删；Esc / 点 X 关闭框 → clickedButton 为 None → False。
+    """
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Question)
+    box.setWindowTitle(title)
+    box.setText(text)
+    yes = box.addButton("确认删除", QMessageBox.YesRole)
+    cancel = box.addButton("取消", QMessageBox.RejectRole)
+    # 必须显式指定「取消」为默认：buttons() 的返回顺序由平台布局决定，
+    # 取得最后一个可能正是「确认删除」——回车就直接删了。
+    box.setDefaultButton(cancel)
+    box.exec()
+    return box.clickedButton() is yes
+
+
 class HostDialog(QDialog):
     """新增 / 修改一个会话。"""
 
@@ -329,7 +347,7 @@ class SessionManager(QDialog):
         h = self._current()
         if not h:
             return
-        if QMessageBox.question(self, "删除", "删除会话「%s」？" % (h.name or h.host)) != QMessageBox.Yes:
+        if not ask_delete(self, "删除会话", "删除会话「%s」？" % (h.name or h.host)):
             return
         self.cfg.hosts.remove(h)
         self.cfg.save()

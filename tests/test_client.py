@@ -366,7 +366,7 @@ def main() -> int:
         assert not img.isNull(), "截图失败"
         win.close()
         for i in reversed(range(win.tabs.count())):
-            win.close_tab(i)
+            win.close_tab(i, drop_only=True)   # 收尾清理：不走「删除连接」二次确认
         app.processEvents()
         drop_widget(win)
 
